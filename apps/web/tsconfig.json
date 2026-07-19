@@ -1,0 +1,14 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "types": ["vite/client"],
+    "paths": {
+      "@kilndb/shared": ["../../packages/shared/src/index.ts"],
+      "@kilndb/shared/*": ["../../packages/shared/src/*"],
+      "@/*": ["./src/*"]
+    },
+    "noEmit": true
+  },
+  "include": ["src/**/*", "../../packages/shared/src/**/*"]
+}

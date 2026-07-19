@@ -1,0 +1,78 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@font-face {
+  font-family: "Montserrat";
+  font-style: normal;
+  font-weight: 500 600;
+  font-display: swap;
+  src: url("/fonts/montserrat-latin.woff2") format("woff2");
+}
+
+@layer base {
+  :root {
+    color-scheme: dark;
+    --surface-base: 19 17 16;
+    --surface-panel: 27 24 23;
+    --surface-raised: 38 33 31;
+    --surface-overlay: 31 27 26;
+    --edge: 53 45 42;
+    --edge-strong: 78 64 59;
+    --content-1: 244 239 236;
+    --content-2: 180 166 159;
+    --content-3: 124 108 102;
+    --accent: 216 93 63;
+    --accent-hover: 235 113 78;
+    --accent-fg: 255 248 244;
+    --ok: 74 179 126;
+    --warn: 230 158 65;
+    --danger: 239 68 68;
+    --danger-hover: 220 38 38;
+    --chart-1: 216 93 63;
+    --chart-2: 239 137 93;
+    --chart-3: 169 64 47;
+    --chart-4: 201 154 101;
+    --chart-5: 146 96 82;
+    --chart-6: 100 145 132;
+    --chart-other: 124 108 102;
+  }
+  html, body, #root { height: 100%; }
+  body {
+    font-family: theme('fontFamily.sans');
+    -webkit-font-smoothing: antialiased;
+    background: theme('colors.bg.DEFAULT');
+    color: theme('colors.text.DEFAULT');
+  }
+  ::selection { background: rgb(var(--accent)); color: rgb(var(--accent-fg)); }
+
+  /* WebKit scrollbar */
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-track { background: theme('colors.bg.DEFAULT'); }
+  ::-webkit-scrollbar-thumb { background: theme('colors.border.DEFAULT'); border-radius: 6px; }
+  ::-webkit-scrollbar-thumb:hover { background: theme('colors.border.strong'); }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+}
+
+@layer components {
+  .brand-wordmark {
+    font-family: "Montserrat", theme('fontFamily.sans');
+    font-weight: 600;
+    letter-spacing: -0.025em;
+  }
+  .card-surface {
+    @apply bg-bg-panel border border-border rounded-lg shadow-card;
+  }
+  .field-input {
+    @apply w-full bg-bg-subtle border border-border rounded-md px-3 py-2 text-sm text-text
+      placeholder:text-text-subtle outline-none focus:border-accent focus:ring-1 focus:ring-accent
+      transition-colors;
+  }
+}

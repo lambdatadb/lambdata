@@ -1,0 +1,15 @@
+{
+  "name": "@kilndb/shared",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./types": "./src/types.ts",
+    "./terminology": "./src/terminology.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  }
+}

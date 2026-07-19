@@ -1,0 +1,17 @@
+name: kilndb
+
+services:
+  kilndb:
+    build: .
+    image: kilndb:latest
+    container_name: kilndb
+    restart: unless-stopped
+    ports:
+      - "4317:4317"
+    volumes:
+      - kilndb-data:/data
+    environment:
+      KILNDB_COOKIE_SECURE: "0"
+
+volumes:
+  kilndb-data:
