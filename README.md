@@ -133,6 +133,25 @@ docker run -d \
   kilndb:latest
 ```
 
+### Option 3: Unraid
+
+KilnDB publishes multi-architecture images to GitHub Container Registry and includes an Unraid Docker template with persistent data, Web UI, health-check, and native per-container Tailscale support.
+
+From the Unraid terminal:
+
+```bash
+mkdir -p /boot/config/plugins/dockerMan/templates-user
+curl -fsSL \
+  https://raw.githubusercontent.com/maybegrim/KilnDB/main/unraid/kilndb.xml \
+  -o /boot/config/plugins/dockerMan/templates-user/my-KilnDB.xml
+```
+
+Go to **Docker → Add Container**, choose **KilnDB** from the Template menu, and apply it. The template pulls `ghcr.io/maybegrim/kilndb:latest`, publishes the console on port `4317`, and stores the complete installation under `/mnt/user/appdata/kilndb`.
+
+On Unraid 7.2 or newer, turn on **Use Tailscale** in the KilnDB container template to give the container its own tailnet identity. The template persists Tailscale state under `/data/.tailscale_state`; Unraid injects and manages the client before KilnDB starts. If you enable Tailscale Serve over HTTPS, set `KILNDB_COOKIE_SECURE` to `1`.
+
+See [Unraid deployment](docs/unraid.md) for authentication, Serve, updates, and backup guidance.
+
 ### Local development
 
 Install [Bun](https://bun.sh) and MariaDB client/server tools, then run:
@@ -325,6 +344,7 @@ kilndb/
 ├── packages/shared/      shared types and terminology
 ├── docs/screenshots/     README images
 ├── scripts/              development and visual checks
+├── unraid/kilndb.xml     Unraid Docker template
 ├── Dockerfile
 ├── docker-compose.yml
 └── package.json

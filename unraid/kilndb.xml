@@ -1,0 +1,28 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>KilnDB</Name>
+  <Repository>ghcr.io/maybegrim/kilndb:latest</Repository>
+  <Registry>https://github.com/maybegrim/KilnDB/pkgs/container/kilndb</Registry>
+  <Network>bridge</Network>
+  <MyIP/>
+  <Shell>bash</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/maybegrim/KilnDB/issues</Support>
+  <Project>https://github.com/maybegrim/KilnDB</Project>
+  <ReadMe>https://github.com/maybegrim/KilnDB#readme</ReadMe>
+  <Overview>Self-hosted MySQL and MariaDB control plane with a web console, Data API, Auth, Realtime, Functions, Storage, and native Unraid Tailscale integration.</Overview>
+  <Category>Tools: Network:Management</Category>
+  <WebUI>http://[IP]:[PORT:4317]/</WebUI>
+  <TemplateURL>https://raw.githubusercontent.com/maybegrim/KilnDB/main/unraid/kilndb.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/maybegrim/KilnDB/main/apps/web/public/kilndb-mark.png</Icon>
+  <ExtraParams/>
+  <PostArgs/>
+  <CPUset/>
+  <DonateText/>
+  <DonateLink/>
+  <Requires>Unraid 7.2 or newer is required for native per-container Tailscale integration.</Requires>
+  <TailscaleStateDir>/data/.tailscale_state</TailscaleStateDir>
+  <Config Name="KilnDB Data" Target="/data" Default="/mnt/user/appdata/kilndb" Mode="rw" Description="Persistent databases, metadata, encryption keys, snapshots, storage objects, functions, logs, and Tailscale state." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/kilndb</Config>
+  <Config Name="Web UI" Target="4317" Default="4317" Mode="tcp" Description="KilnDB web console and API port." Type="Port" Display="always" Required="true" Mask="false">4317</Config>
+  <Config Name="Secure Cookies" Target="KILNDB_COOKIE_SECURE" Default="0" Mode="" Description="Set to 1 when the console is served through HTTPS, including Tailscale Serve." Type="Variable" Display="advanced" Required="true" Mask="false">0</Config>
+</Container>

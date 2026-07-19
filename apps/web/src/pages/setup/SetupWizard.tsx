@@ -78,7 +78,7 @@ export function SetupWizard() {
         const r = await api.get<TailscaleStatus>("/tailscale/status");
         setTsStatus(r);
       } catch {
-        setTsStatus({ installed: false, running: false, hostname: null, tailnetIp: null });
+        setTsStatus({ installed: false, running: false, hostname: null, tailnetIp: null, managedBy: null });
       }
     }
   };
@@ -297,12 +297,18 @@ export function SetupWizard() {
             {step === "tailscale" && (
               <>
                 <h1 className="text-xl font-semibold tracking-tight">Tailscale (optional)</h1>
-                {tsStatus?.installed === false && (
+                {tsStatus?.managedBy === "unraid" && (
+                  <p className="text-sm text-text-muted">
+                    Tailscale is managed by the Unraid container template. Complete authentication from the
+                    container log or change its network settings in Unraid.
+                  </p>
+                )}
+                {tsStatus?.managedBy !== "unraid" && tsStatus?.installed === false && (
                   <p className="text-sm text-text-muted">
                     Tailscale isn't installed on this host. You can skip this and configure it later from Settings.
                   </p>
                 )}
-                {tsStatus?.installed && !tsStatus.running && (
+                {tsStatus?.managedBy !== "unraid" && tsStatus?.installed && !tsStatus.running && (
                   <>
                     <p className="text-sm text-text-muted">
                       Bring your tailnet up to optionally expose databases over Tailscale only.
@@ -325,7 +331,7 @@ export function SetupWizard() {
                 {err && <p className="text-sm text-danger">{err}</p>}
                 <div className="flex justify-between pt-2">
                   <Button variant="ghost" onClick={() => goto("done")}>Skip</Button>
-                  {tsStatus?.installed && !tsStatus.running ? (
+                  {tsStatus?.managedBy !== "unraid" && tsStatus?.installed && !tsStatus.running ? (
                     <Button loading={busy} onClick={tsUp}>Bring tailnet up</Button>
                   ) : (
                     <Button onClick={() => goto("done")}>Continue</Button>

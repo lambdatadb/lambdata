@@ -45,15 +45,18 @@ export function Tailscale() {
       <Card>
         <div className="flex items-center justify-between mb-2">
           <CardTitle>Status</CardTitle>
-          {!isLoading && data && (
-            data.running ? (
-              <Badge tone="success">Running</Badge>
-            ) : data.installed ? (
-              <Badge tone="warn">Installed · stopped</Badge>
-            ) : (
-              <Badge tone="muted">Not installed</Badge>
-            )
-          )}
+          <div className="flex items-center gap-2">
+            {!isLoading && data?.managedBy === "unraid" && <Badge tone="muted">Managed by Unraid</Badge>}
+            {!isLoading && data && (
+              data.running ? (
+                <Badge tone="success">Running</Badge>
+              ) : data.installed ? (
+                <Badge tone="warn">Installed · stopped</Badge>
+              ) : (
+                <Badge tone="muted">Not installed</Badge>
+              )
+            )}
+          </div>
         </div>
         {isLoading ? (
           <SkeletonRows rows={2} />
@@ -67,24 +70,33 @@ export function Tailscale() {
         ) : null}
         {user?.role === "admin" && (
           <div className="mt-5 pt-5 border-t border-border space-y-3">
-            {data?.installed && !data.running && (
-              <>
-                <Field label="Auth key (optional)" hint="Leave blank to use the browser flow">
-                  <Input value={authKey} onChange={(e) => setAuthKey(e.target.value)} placeholder="tskey-auth-..." />
-                </Field>
-                <Button loading={up.isPending} onClick={() => up.mutate()}>Bring up</Button>
-              </>
-            )}
-            {data?.running && (
-              <Button variant="secondary" loading={down.isPending} onClick={() => down.mutate()}>
-                Bring down
-              </Button>
-            )}
-            {!data?.installed && (
+            {data?.managedBy === "unraid" ? (
               <p className="text-body text-text-muted">
-                Install Tailscale on this host (<a className="text-accent" href="https://tailscale.com/download">tailscale.com/download</a>),
-                then come back.
+                Tailscale is managed by Unraid. Edit the KilnDB container template to change its hostname,
+                authentication, networking, or Serve settings.
               </p>
+            ) : (
+              <>
+                {data?.installed && !data.running && (
+                  <>
+                    <Field label="Auth key (optional)" hint="Leave blank to use the browser flow">
+                      <Input value={authKey} onChange={(e) => setAuthKey(e.target.value)} placeholder="tskey-auth-..." />
+                    </Field>
+                    <Button loading={up.isPending} onClick={() => up.mutate()}>Bring up</Button>
+                  </>
+                )}
+                {data?.running && (
+                  <Button variant="secondary" loading={down.isPending} onClick={() => down.mutate()}>
+                    Bring down
+                  </Button>
+                )}
+                {!data?.installed && (
+                  <p className="text-body text-text-muted">
+                    Install Tailscale on this host (<a className="text-accent" href="https://tailscale.com/download">tailscale.com/download</a>),
+                    then come back.
+                  </p>
+                )}
+              </>
             )}
           </div>
         )}

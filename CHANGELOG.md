@@ -5,6 +5,9 @@ All notable changes to KilnDB.
 ## Unreleased
 
 ### Changed
+- Added an installable Unraid Docker template backed by the published GHCR image, including persistent native Tailscale state under `/data/.tailscale_state`.
+- Made Tailscale controls read-only when lifecycle management is provided by Unraid's injected container hook.
+- Documented Unraid installation, per-container Tailscale authentication, Serve, updates, and backups.
 - Renamed the project and all public/runtime namespaces to KilnDB, including package scopes, environment variables, persistent paths, cookies, generated API metadata, Docker assets, and database-user prefixes.
 - Replaced the previous box mark with a transparent database-stack bottle-kiln mark and adopted a warm charcoal and kiln-red visual system throughout the console.
 - Reworked the public README around the Docker-first installation path, current feature set, operational model, backups, and security boundaries.

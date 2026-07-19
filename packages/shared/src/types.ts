@@ -250,6 +250,7 @@ export interface TailscaleStatus {
   running: boolean;
   hostname: string | null;
   tailnetIp: string | null;
+  managedBy: "unraid" | null;
 }
 
 export interface SetupState {

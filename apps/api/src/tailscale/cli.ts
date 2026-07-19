@@ -14,14 +14,19 @@ async function run(args: string[]): Promise<{ code: number; stdout: string; stde
   }
 }
 
+export function tailscaleManager(): TailscaleStatus["managedBy"] {
+  return process.env.ORG_ENTRYPOINT && process.env.TAILSCALE_STATE_DIR ? "unraid" : null;
+}
+
 export async function tailscaleStatus(): Promise<TailscaleStatus> {
+  const managedBy = tailscaleManager();
   const ver = await run(["--version"]);
   if (ver.code !== 0) {
-    return { installed: false, running: false, hostname: null, tailnetIp: null };
+    return { installed: false, running: false, hostname: null, tailnetIp: null, managedBy };
   }
   const s = await run(["status", "--json"]);
   if (s.code !== 0) {
-    return { installed: true, running: false, hostname: null, tailnetIp: null };
+    return { installed: true, running: false, hostname: null, tailnetIp: null, managedBy };
   }
   try {
     const data = JSON.parse(s.stdout) as {
@@ -34,9 +39,10 @@ export async function tailscaleStatus(): Promise<TailscaleStatus> {
       running: data.BackendState === "Running",
       hostname: data.Self?.HostName ?? null,
       tailnetIp: ip,
+      managedBy,
     };
   } catch {
-    return { installed: true, running: false, hostname: null, tailnetIp: null };
+    return { installed: true, running: false, hostname: null, tailnetIp: null, managedBy };
   }
 }
 

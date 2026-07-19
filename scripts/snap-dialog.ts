@@ -31,7 +31,7 @@ page.on("request", (request) => {
     void request.respond({
       status: 200,
       contentType: "application/json",
-      body: JSON.stringify({ installed: false, running: false, hostname: null, tailnetIp: null }),
+      body: JSON.stringify({ installed: false, running: false, hostname: null, tailnetIp: null, managedBy: null }),
     });
     return;
   }
