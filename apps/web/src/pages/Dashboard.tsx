@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useNavigate } from "react-router-dom";
-import type { DashboardSummary, DashboardVitals } from "@kilndb/shared";
+import type { DashboardSummary, DashboardVitals, TailscaleStatus } from "@kilndb/shared";
 import { api } from "../lib/api";
 import { PageHeader } from "../components/layout/PageShell";
 import { Card, CardTitle } from "../components/ui/Card";
@@ -14,9 +14,11 @@ import { Skeleton } from "../components/ui/Skeleton";
 import { StatTile } from "../components/ui/StatTile";
 import { Table, TBody, TD, TH, THead, TR, TableSkeleton } from "../components/ui/Table";
 import { formatBytes, formatRelativeTime } from "../lib/format";
+import { formatConnectionAddress, useConnectionInfo } from "../lib/useConnectionInfo";
 
 export function Dashboard() {
   const nav = useNavigate();
+  const connection = useConnectionInfo();
   const summary = useQuery({
     queryKey: ["dashboard", "summary"],
     queryFn: () => api.get<DashboardSummary>("/dashboard/summary"),
@@ -27,17 +29,40 @@ export function Dashboard() {
     queryFn: () => api.get<DashboardVitals>("/dashboard/vitals?range=30d&maxPoints=120"),
     refetchInterval: 60_000,
   });
+  const tailscale = useQuery({
+    queryKey: ["tailscale", "status"],
+    queryFn: () => api.get<TailscaleStatus>("/tailscale/status"),
+    refetchInterval: 30_000,
+    enabled: summary.data?.system.dashboardShowAddresses !== false,
+  });
 
   const s = summary.data;
+  const publicAddress = formatConnectionAddress(connection.host, connection.port);
+  const tailnetAddress =
+    tailscale.data?.running && tailscale.data.tailnetIp
+      ? formatConnectionAddress(tailscale.data.tailnetIp, connection.port)
+      : null;
 
   return (
     <>
       <PageHeader
         title="Overview"
         subtitle={
-          s ? (
-            <span className="font-mono">
-              {s.system.host}:{s.system.port}
+          s?.system.dashboardShowAddresses ? (
+            <span className="flex flex-wrap items-center gap-x-3 gap-y-1 font-mono">
+              <span className="inline-flex items-center gap-1.5">
+                <span className="text-micro uppercase tracking-wide text-text-subtle">Public</span>
+                <span>{publicAddress}</span>
+              </span>
+              {tailnetAddress && (
+                <>
+                  <span className="text-text-subtle">·</span>
+                  <span className="inline-flex items-center gap-1.5">
+                    <span className="text-micro uppercase tracking-wide text-text-subtle">Tailnet</span>
+                    <span>{tailnetAddress}</span>
+                  </span>
+                </>
+              )}
             </span>
           ) : undefined
         }

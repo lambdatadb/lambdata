@@ -5,7 +5,7 @@ import type {
   DashboardVitals,
   DashboardVitalsSeries,
 } from "@kilndb/shared";
-import { databases, functionInvocations, metrics, snapshots, storageBuckets, syncJobs } from "../db/queries";
+import { databases, functionInvocations, metrics, settings, snapshots, storageBuckets, syncJobs } from "../db/queries";
 import { requireAuth, type AuthVariables } from "../auth/middleware";
 import { bucketMsFor } from "./metrics";
 import { realtimeStatus } from "../realtime/hub";
@@ -110,6 +110,7 @@ dashboardRoute.get("/summary", async (c) => {
       mariadbOk: (await healthCheck()).ok,
       host: env.mariadbBind,
       port: env.mariadbPort,
+      dashboardShowAddresses: settings.get("dashboard_show_addresses") !== "0",
     },
   };
   return c.json(res);

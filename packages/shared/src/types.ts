@@ -270,6 +270,7 @@ export interface QueryResult {
 export interface AppSettings {
   setupComplete: boolean;
   tailscaleEnabled: boolean;
+  dashboardShowAddresses: boolean;
   mariadbPort: number;
   dataDir: string;
   pointerPath: string;
@@ -342,5 +343,11 @@ export interface DashboardSummary {
   sync: { mirrors: number; ok: number; failing: number; lastError: string | null };
   realtime: { connections: number; channels: number; messagesSent: number };
   functions: { total: number; invocations24h: number };
-  system: { dataDirFreeBytes: number | null; mariadbOk: boolean; host: string; port: number };
+  system: {
+    dataDirFreeBytes: number | null;
+    mariadbOk: boolean;
+    host: string;
+    port: number;
+    dashboardShowAddresses: boolean;
+  };
 }

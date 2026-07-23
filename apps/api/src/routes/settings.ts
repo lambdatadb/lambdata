@@ -17,6 +17,7 @@ settingsRoute.get("/", async (c) => {
   const res: AppSettings = {
     setupComplete: store.get("setup_complete") === "1",
     tailscaleEnabled: store.get("tailscale_enabled") === "1",
+    dashboardShowAddresses: store.get("dashboard_show_addresses") !== "0",
     mariadbPort: env.mariadbPort,
     dataDir: env.dataDir,
     pointerPath: POINTER_PATH,

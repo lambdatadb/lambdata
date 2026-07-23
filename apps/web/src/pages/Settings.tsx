@@ -36,6 +36,15 @@ export function Settings() {
     },
     onError: (e) => toast.show(e instanceof ApiError ? e.message : "update failed", "error"),
   });
+  const updateSettings = useMutation({
+    mutationFn: (body: Record<string, boolean>) => api.patch("/settings", body),
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ["settings"] });
+      await qc.invalidateQueries({ queryKey: ["dashboard", "summary"] });
+      toast.show("Dashboard display updated", "success");
+    },
+    onError: (e) => toast.show(e instanceof ApiError ? e.message : "update failed", "error"),
+  });
 
   if (!user) return null;
 
@@ -92,12 +101,19 @@ export function Settings() {
 
         <Card>
           <CardTitle>Display</CardTitle>
-          <div className="mt-3">
+          <div className="mt-3 space-y-4">
             <Switch
               checked={user.dataViewEnabled}
               onChange={(v) => updateMe.mutate({ dataViewEnabled: v })}
               label="Show vitals strip on database overview"
               description="A 24-hour size ribbon, writes/min heartbeat, and table/row/connection counts. Computed from periodic metadata polls — no row contents are read."
+            />
+            <Switch
+              checked={data?.dashboardShowAddresses ?? true}
+              onChange={(v) => updateSettings.mutate({ dashboard_show_addresses: v })}
+              disabled={user.role !== "admin" || !data || updateSettings.isPending}
+              label="Show connection addresses on dashboard"
+              description="Show the public database endpoint and, while Tailscale is connected, the Tailnet endpoint beneath Overview."
             />
           </div>
         </Card>
