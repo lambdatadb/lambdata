@@ -2,6 +2,7 @@ import type {
   AppAuthUser,
   AppAuthUserStatus,
   AuditLogEntry,
+  ColorTheme,
   Database as Db,
   DataApiPolicy,
   DatabaseKind,
@@ -18,6 +19,7 @@ import type {
   SyncSourceKind,
   SyncStatus,
   User,
+  VitalsChartStyle,
 } from "@kilndb/shared";
 import { db } from "./client";
 
@@ -29,6 +31,8 @@ type UserRow = {
   role: Role;
   experience_level: ExperienceLevel;
   data_view_enabled: number;
+  color_theme: ColorTheme;
+  vitals_chart_style: VitalsChartStyle;
   created_at: number;
   last_login_at: number | null;
 };
@@ -158,6 +162,10 @@ function rowToUser(r: UserRow): User {
     role: r.role,
     experienceLevel: r.experience_level,
     dataViewEnabled: r.data_view_enabled === 1,
+    colorTheme: r.color_theme === "tide" || r.color_theme === "grove" || r.color_theme === "orchid"
+      ? r.color_theme
+      : "ember",
+    vitalsChartStyle: r.vitals_chart_style === "capsules" ? "capsules" : "area",
     createdAt: r.created_at,
     lastLoginAt: r.last_login_at,
   };
@@ -350,6 +358,12 @@ export const users = {
   },
   updateDataView(id: string, enabled: boolean): void {
     db.query("UPDATE users SET data_view_enabled = ? WHERE id = ?").run(enabled ? 1 : 0, id);
+  },
+  updateColorTheme(id: string, theme: ColorTheme): void {
+    db.query("UPDATE users SET color_theme = ? WHERE id = ?").run(theme, id);
+  },
+  updateVitalsChartStyle(id: string, style: VitalsChartStyle): void {
+    db.query("UPDATE users SET vitals_chart_style = ? WHERE id = ?").run(style, id);
   },
   delete(id: string): void {
     db.query("DELETE FROM users WHERE id = ?").run(id);
@@ -1046,6 +1060,33 @@ export const metrics = {
       connectionCount: r.connection_count,
       rowCount: r.row_count,
     }));
+  },
+  latestBefore(databaseId: string, beforeMs: number): {
+    collectedAt: number;
+    sizeBytes: number | null;
+    tableCount: number | null;
+    connectionCount: number | null;
+    rowCount: number | null;
+  } | null {
+    const row = db
+      .query(
+        "SELECT collected_at, size_bytes, table_count, connection_count, row_count FROM metrics WHERE database_id = ? AND collected_at < ? ORDER BY collected_at DESC LIMIT 1",
+      )
+      .get(databaseId, beforeMs) as {
+      collected_at: number;
+      size_bytes: number | null;
+      table_count: number | null;
+      connection_count: number | null;
+      row_count: number | null;
+    } | null;
+    if (!row) return null;
+    return {
+      collectedAt: row.collected_at,
+      sizeBytes: row.size_bytes,
+      tableCount: row.table_count,
+      connectionCount: row.connection_count,
+      rowCount: row.row_count,
+    };
   },
   prune(olderThanMs: number): void {
     db.query("DELETE FROM metrics WHERE collected_at < ?").run(olderThanMs);

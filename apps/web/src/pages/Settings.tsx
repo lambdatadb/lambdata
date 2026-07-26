@@ -1,9 +1,17 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
-import type { AppSettings, DataDirMigrationResponse, ExperienceLevel, PathValidationResponse } from "@kilndb/shared";
+import type {
+  AppSettings,
+  ColorTheme,
+  DataDirMigrationResponse,
+  ExperienceLevel,
+  PathValidationResponse,
+  VitalsChartStyle,
+} from "@kilndb/shared";
 import { api, ApiError } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { formatBytes } from "../lib/format";
+import { applyColorTheme } from "../lib/theme";
 import { PageHeader } from "../components/layout/PageShell";
 import { Card, CardTitle } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
@@ -14,6 +22,51 @@ import { Dialog } from "../components/ui/Dialog";
 import { Icon } from "../components/ui/Icon";
 import { useToast } from "../components/ui/Toast";
 import { DataDirPicker } from "../components/storage/DataDirPicker";
+import { cn } from "../components/ui/cn";
+
+const COLOR_THEMES: {
+  value: ColorTheme;
+  label: string;
+  description: string;
+}[] = [
+  {
+    value: "ember",
+    label: "Ember",
+    description: "Warm charcoal and kiln orange",
+  },
+  {
+    value: "tide",
+    label: "Tide",
+    description: "Deep navy and electric cyan",
+  },
+  {
+    value: "grove",
+    label: "Grove",
+    description: "Forest green and burnished gold",
+  },
+  {
+    value: "orchid",
+    label: "Orchid",
+    description: "Ink purple and soft magenta",
+  },
+];
+
+const CHART_STYLES: {
+  value: VitalsChartStyle;
+  label: string;
+  description: string;
+}[] = [
+  {
+    value: "area",
+    label: "Area",
+    description: "Smooth stacked history with animated fills",
+  },
+  {
+    value: "capsules",
+    label: "Capsules",
+    description: "Discrete rounded snapshots with animated stacks",
+  },
+];
 
 export function Settings() {
   const { user, refetch } = useAuth();
@@ -47,6 +100,15 @@ export function Settings() {
   });
 
   if (!user) return null;
+
+  const changeTheme = (theme: ColorTheme) => {
+    const previous = user.colorTheme;
+    applyColorTheme(theme, true);
+    updateMe.mutate(
+      { colorTheme: theme },
+      { onError: () => applyColorTheme(previous, true) },
+    );
+  };
 
   return (
     <>
@@ -101,20 +163,97 @@ export function Settings() {
 
         <Card>
           <CardTitle>Display</CardTitle>
-          <div className="mt-3 space-y-4">
-            <Switch
-              checked={user.dataViewEnabled}
-              onChange={(v) => updateMe.mutate({ dataViewEnabled: v })}
-              label="Show vitals strip on database overview"
-              description="A 24-hour size ribbon, writes/min heartbeat, and table/row/connection counts. Computed from periodic metadata polls — no row contents are read."
-            />
-            <Switch
-              checked={data?.dashboardShowAddresses ?? true}
-              onChange={(v) => updateSettings.mutate({ dashboard_show_addresses: v })}
-              disabled={user.role !== "admin" || !data || updateSettings.isPending}
-              label="Show connection addresses on dashboard"
-              description="Show the public database endpoint and, while Tailscale is connected, the Tailnet endpoint beneath Overview."
-            />
+          <div className="mt-4 space-y-5">
+            <div>
+              <div className="text-label font-medium text-text-muted">Color palette</div>
+              <p className="mt-0.5 text-micro text-text-subtle">
+                Changes surfaces, accents, charts, and interactive states across KilnDB.
+              </p>
+              <div className="mt-2.5 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+                {COLOR_THEMES.map((theme) => {
+                  const selected = user.colorTheme === theme.value;
+                  return (
+                    <button
+                      key={theme.value}
+                      type="button"
+                      aria-pressed={selected}
+                      disabled={updateMe.isPending}
+                      onClick={() => changeTheme(theme.value)}
+                      className={cn(
+                        "preference-tile rounded-lg border p-3 text-left disabled:cursor-not-allowed disabled:opacity-60",
+                        selected
+                          ? "border-accent bg-accent/[0.06] shadow-card"
+                          : "border-border bg-bg-subtle/45 hover:border-border-strong hover:bg-bg-subtle",
+                      )}
+                    >
+                      <span
+                        className="flex items-center gap-1.5"
+                        data-palette-preview={theme.value}
+                        aria-hidden
+                      >
+                        {Array.from({ length: 3 }, (_, index) => (
+                          <span
+                            key={index}
+                            className={`palette-preview__swatch palette-preview__swatch--${index + 1} size-3 rounded-full ring-1 ring-white/10`}
+                          />
+                        ))}
+                      </span>
+                      <span className="mt-2 block text-body font-medium">{theme.label}</span>
+                      <span className="mt-0.5 block text-micro text-text-muted">{theme.description}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="border-t border-border pt-4">
+              <div className="text-label font-medium text-text-muted">Cluster vitals visualization</div>
+              <p className="mt-0.5 text-micro text-text-subtle">
+                Choose how storage history is drawn on the dashboard.
+              </p>
+              <div className="mt-2.5 grid gap-2 sm:grid-cols-2">
+                {CHART_STYLES.map((style) => {
+                  const selected = user.vitalsChartStyle === style.value;
+                  return (
+                    <button
+                      key={style.value}
+                      type="button"
+                      aria-pressed={selected}
+                      disabled={updateMe.isPending}
+                      onClick={() => updateMe.mutate({ vitalsChartStyle: style.value })}
+                      className={cn(
+                        "preference-tile flex items-center gap-3 rounded-lg border p-3 text-left disabled:cursor-not-allowed disabled:opacity-60",
+                        selected
+                          ? "border-accent bg-accent/[0.06] shadow-card"
+                          : "border-border bg-bg-subtle/45 hover:border-border-strong hover:bg-bg-subtle",
+                      )}
+                    >
+                      <ChartStylePreview style={style.value} />
+                      <span>
+                        <span className="block text-body font-medium">{style.label}</span>
+                        <span className="mt-0.5 block text-micro text-text-muted">{style.description}</span>
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="space-y-4 border-t border-border pt-4">
+              <Switch
+                checked={user.dataViewEnabled}
+                onChange={(v) => updateMe.mutate({ dataViewEnabled: v })}
+                label="Show vitals strip on database overview"
+                description="A 24-hour size ribbon, writes/min heartbeat, and table/row/connection counts. Computed from periodic metadata polls — no row contents are read."
+              />
+              <Switch
+                checked={data?.dashboardShowAddresses ?? true}
+                onChange={(v) => updateSettings.mutate({ dashboard_show_addresses: v })}
+                disabled={user.role !== "admin" || !data || updateSettings.isPending}
+                label="Show connection addresses on dashboard"
+                description="Show the public database endpoint and, while Tailscale is connected, the Tailnet endpoint beneath Overview."
+              />
+            </div>
           </div>
         </Card>
 
@@ -162,6 +301,48 @@ export function Settings() {
         current={data?.dataDir ?? ""}
       />
     </>
+  );
+}
+
+function ChartStylePreview({ style }: { style: VitalsChartStyle }) {
+  return (
+    <svg
+      aria-hidden
+      viewBox="0 0 64 40"
+      className="h-10 w-16 shrink-0 overflow-visible rounded-md border border-border bg-bg p-1"
+    >
+      {style === "area" ? (
+        <>
+          <path
+            d="M1 34 C10 33 13 27 21 28 C30 30 33 17 42 19 C51 20 54 8 63 7 L63 39 L1 39 Z"
+            fill="rgb(var(--chart-1))"
+            fillOpacity="0.24"
+          />
+          <path
+            d="M1 34 C10 33 13 27 21 28 C30 30 33 17 42 19 C51 20 54 8 63 7"
+            fill="none"
+            stroke="rgb(var(--chart-1))"
+            strokeWidth="1.5"
+          />
+        </>
+      ) : (
+        Array.from({ length: 9 }, (_, index) => {
+          const height = 8 + index * 2.8 + (index % 3) * 3;
+          return (
+            <rect
+              key={index}
+              x={2 + index * 7}
+              y={38 - height}
+              width="4.5"
+              height={height}
+              rx="2.25"
+              fill="rgb(var(--chart-1))"
+              opacity={0.38 + index * 0.07}
+            />
+          );
+        })
+      )}
+    </svg>
   );
 }
 

@@ -12,7 +12,8 @@ function ensureColumn(table: string, column: string, ddl: string): void {
 export function migrate(): void {
   const schema = readFileSync(join(import.meta.dir, "schema.sql"), "utf8");
   db.exec(schema);
-  // Incremental column adds for existing installs.
   ensureColumn("users", "data_view_enabled", "INTEGER NOT NULL DEFAULT 0");
+  ensureColumn("users", "color_theme", "TEXT NOT NULL DEFAULT 'ember'");
+  ensureColumn("users", "vitals_chart_style", "TEXT NOT NULL DEFAULT 'area'");
   ensureColumn("metrics", "row_count", "INTEGER");
 }

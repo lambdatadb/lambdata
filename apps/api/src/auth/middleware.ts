@@ -23,6 +23,8 @@ export const requireAuth: MiddlewareHandler<{ Variables: AuthVariables }> = asyn
     role: user.role,
     experienceLevel: user.experienceLevel,
     dataViewEnabled: user.dataViewEnabled,
+    colorTheme: user.colorTheme,
+    vitalsChartStyle: user.vitalsChartStyle,
     createdAt: user.createdAt,
     lastLoginAt: user.lastLoginAt,
   });
@@ -60,7 +62,6 @@ export function requireDbAccess(
       }
       return next();
     }
-    // viewer
     if (level !== "read") {
       throw new HTTPException(403, { message: "read-only role" });
     }

@@ -12,6 +12,10 @@ CREATE TABLE IF NOT EXISTS users (
   experience_level TEXT NOT NULL DEFAULT 'advanced'
     CHECK (experience_level IN ('novice','advanced')),
   data_view_enabled INTEGER NOT NULL DEFAULT 0,
+  color_theme TEXT NOT NULL DEFAULT 'ember'
+    CHECK (color_theme IN ('ember','tide','grove','orchid')),
+  vitals_chart_style TEXT NOT NULL DEFAULT 'area'
+    CHECK (vitals_chart_style IN ('area','capsules')),
   created_at INTEGER NOT NULL,
   last_login_at INTEGER
 );

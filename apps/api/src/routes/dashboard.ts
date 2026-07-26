@@ -16,6 +16,9 @@ import { dataDirFreeBytes } from "../util/disk";
 import { env } from "../env";
 
 const RANGE_MS: Record<string, number> = {
+  "1d": 24 * 60 * 60 * 1000,
+  "5d": 5 * 24 * 60 * 60 * 1000,
+  "15d": 15 * 24 * 60 * 60 * 1000,
   "24h": 24 * 60 * 60 * 1000,
   "7d": 7 * 24 * 60 * 60 * 1000,
   "30d": 30 * 24 * 60 * 60 * 1000,
@@ -27,18 +30,27 @@ dashboardRoute.use("*", requireAuth);
 
 dashboardRoute.get("/vitals", (c) => {
   requestFreshMetrics();
+  const user = c.get("user");
   const range = c.req.query("range") ?? "30d";
   const rangeMs = RANGE_MS[range] ?? RANGE_MS["30d"]!;
   const since = Date.now() - rangeMs;
   const bucketMs = bucketMsFor(rangeMs, c.req.query("maxPoints"));
-  const dbs = databases.list();
-  const series: DashboardVitalsSeries[] = dbs.map((d) => ({
-    databaseId: d.id,
-    name: d.name,
-    displayName: d.displayName,
-    kind: d.kind,
-    samples: metrics.range(d.id, since, bucketMs),
-  }));
+  const dbs = (user.role === "db_owner" ? databases.listForUser(user.id) : databases.list())
+    .filter((database) => database.name !== "scpticket_mirror");
+  const series: DashboardVitalsSeries[] = dbs.map((d) => {
+    const samples = metrics.range(d.id, since, bucketMs);
+    const baseline = metrics.latestBefore(d.id, since) ?? samples[0];
+    if (baseline && (samples[0]?.collectedAt ?? Infinity) > since) {
+      samples.unshift({ ...baseline, collectedAt: since });
+    }
+    return {
+      databaseId: d.id,
+      name: d.name,
+      displayName: d.displayName,
+      kind: d.kind,
+      samples,
+    };
+  });
   const res: DashboardVitals = {
     rangeMs,
     collectedAt: Date.now(),

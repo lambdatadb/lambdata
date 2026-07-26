@@ -1,7 +1,13 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useNavigate } from "react-router-dom";
-import type { DashboardSummary, DashboardVitals, TailscaleStatus } from "@kilndb/shared";
+import { motion } from "framer-motion";
+import type {
+  DashboardSummary,
+  DashboardVitals,
+  TailscaleStatus,
+  VitalsChartStyle,
+} from "@kilndb/shared";
 import { api } from "../lib/api";
 import { PageHeader } from "../components/layout/PageShell";
 import { Card, CardTitle } from "../components/ui/Card";
@@ -15,18 +21,31 @@ import { StatTile } from "../components/ui/StatTile";
 import { Table, TBody, TD, TH, THead, TR, TableSkeleton } from "../components/ui/Table";
 import { formatBytes, formatRelativeTime } from "../lib/format";
 import { formatConnectionAddress, useConnectionInfo } from "../lib/useConnectionInfo";
+import { useAuth } from "../lib/auth";
+
+type VitalsRange = "1d" | "5d" | "15d" | "30d";
+
+const VITALS_RANGES: { value: VitalsRange; label: string }[] = [
+  { value: "1d", label: "1D" },
+  { value: "5d", label: "5D" },
+  { value: "15d", label: "15D" },
+  { value: "30d", label: "30D" },
+];
 
 export function Dashboard() {
   const nav = useNavigate();
+  const { user } = useAuth();
   const connection = useConnectionInfo();
+  const [vitalsRange, setVitalsRange] = useState<VitalsRange>("30d");
   const summary = useQuery({
     queryKey: ["dashboard", "summary"],
     queryFn: () => api.get<DashboardSummary>("/dashboard/summary"),
     refetchInterval: 10_000,
   });
   const vitals = useQuery({
-    queryKey: ["dashboard", "vitals"],
-    queryFn: () => api.get<DashboardVitals>("/dashboard/vitals?range=30d&maxPoints=120"),
+    queryKey: ["dashboard", "vitals", vitalsRange],
+    queryFn: () => api.get<DashboardVitals>(`/dashboard/vitals?range=${vitalsRange}&maxPoints=96`),
+    placeholderData: (previous) => previous,
     refetchInterval: 60_000,
   });
   const tailscale = useQuery({
@@ -159,7 +178,14 @@ export function Dashboard() {
 
       <div className="mt-5 grid grid-cols-1 gap-5 lg:grid-cols-3">
         <Card className="lg:col-span-2">
-          <ClusterVitals data={vitals.data} isLoading={vitals.isLoading} />
+          <ClusterVitals
+            data={vitals.data}
+            isLoading={vitals.isLoading}
+            isFetching={vitals.isFetching}
+            range={vitalsRange}
+            onRangeChange={setVitalsRange}
+            style={user?.vitalsChartStyle ?? "area"}
+          />
         </Card>
         <div className="flex flex-col gap-5">
           <Card>
@@ -279,7 +305,22 @@ const CHART_COLORS = [
 const CHART_OTHER = "rgb(var(--chart-other))";
 const MAX_SERIES = 6;
 
-function ClusterVitals({ data, isLoading }: { data?: DashboardVitals; isLoading: boolean }) {
+function ClusterVitals({
+  data,
+  isLoading,
+  isFetching,
+  range,
+  onRangeChange,
+  style,
+}: {
+  data?: DashboardVitals;
+  isLoading: boolean;
+  isFetching: boolean;
+  range: VitalsRange;
+  onRangeChange: (range: VitalsRange) => void;
+  style: VitalsChartStyle;
+}) {
+  const chartId = useId().replace(/:/g, "");
   const containerRef = useRef<HTMLDivElement>(null);
   const [containerW, setContainerW] = useState(0);
   const [hoverBucket, setHoverBucket] = useState<number | null>(null);
@@ -293,11 +334,45 @@ function ClusterVitals({ data, isLoading }: { data?: DashboardVitals; isLoading:
     return () => ro.disconnect();
   }, []);
 
+  useEffect(() => setHoverBucket(null), [data?.rangeMs, style]);
+
   const series = data?.series ?? [];
   const header = (
-    <div className="mb-3 flex items-baseline justify-between">
-      <CardTitle>Cluster vitals</CardTitle>
-      <span className="text-micro text-text-subtle">storage · 30 days</span>
+    <div className="flex flex-wrap items-start justify-between gap-3">
+      <div>
+        <CardTitle>Cluster vitals</CardTitle>
+        <div className="mt-0.5 flex items-center gap-1.5 text-micro text-text-subtle">
+          <span>Storage footprint</span>
+          <span>·</span>
+          <span>{series.length} {series.length === 1 ? "database" : "databases"}</span>
+          {isFetching && <span className="size-1.5 animate-pulse rounded-full bg-accent" aria-label="Refreshing" />}
+        </div>
+      </div>
+      <div className="relative flex rounded-md border border-border bg-bg p-0.5" role="group" aria-label="Cluster vitals range">
+        {VITALS_RANGES.map((option) => {
+          const active = option.value === range;
+          return (
+            <button
+              key={option.value}
+              type="button"
+              aria-pressed={active}
+              onClick={() => onRangeChange(option.value)}
+              className={`cluster-vitals-range-button relative z-0 min-h-11 min-w-11 rounded px-2 text-micro font-medium ${
+                active ? "text-text" : "text-text-subtle hover:text-text"
+              }`}
+            >
+              {active && (
+                <motion.span
+                  layoutId="cluster-vitals-range"
+                  className="absolute inset-0 -z-10 rounded bg-bg-subtle shadow-card"
+                  transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
+                />
+              )}
+              {option.label}
+            </button>
+          );
+        })}
+      </div>
     </div>
   );
 
@@ -305,7 +380,7 @@ function ClusterVitals({ data, isLoading }: { data?: DashboardVitals; isLoading:
     return (
       <div className="flex h-full flex-col justify-between">
         {header}
-        <Skeleton className="h-40 w-full" />
+        <Skeleton className="mt-5 h-56 w-full" />
       </div>
     );
   }
@@ -321,17 +396,15 @@ function ClusterVitals({ data, isLoading }: { data?: DashboardVitals; isLoading:
     );
   }
 
-  const BUCKETS = 60;
-  const H = 160;
-  const PADDING = 8;
+  const BUCKETS = 48;
+  const H = 236;
+  const PLOT_TOP = 24;
+  const PLOT_BOTTOM = 202;
   const rangeMs = data?.rangeMs ?? 30 * 24 * 60 * 60 * 1000;
   const now = data?.collectedAt ?? Date.now();
   const rangeStart = now - rangeMs;
   const bucketMs = rangeMs / BUCKETS;
 
-  // Per-series step-wise sizeBytes at each bucket boundary. "last known value"
-  // carries forward across empty buckets so the area stays solid even when
-  // metric collection is sparse.
   const rawValues = series.map((sr) => {
     const vals = new Array<number>(BUCKETS).fill(0);
     let last = 0;
@@ -347,23 +420,31 @@ function ClusterVitals({ data, isLoading }: { data?: DashboardVitals; isLoading:
     return vals;
   });
 
-  // Series beyond the palette fold into one gray "Other" band — hue cycling
-  // would make distinct databases indistinguishable.
+  const valuedSeries = series
+    .map((item, index) => ({
+      item,
+      vals: rawValues[index]!,
+      current: rawValues[index]![BUCKETS - 1] ?? 0,
+    }))
+    .sort((a, b) => b.current - a.current);
+  const visibleSeries = valuedSeries.filter((item) => item.vals.some((value) => value > 0));
+  const chartSeries = visibleSeries.length > 0 ? visibleSeries : valuedSeries;
+  const idleCount = valuedSeries.length - visibleSeries.length;
   const bands: { key: string; label: string; link?: string; color: string; vals: number[] }[] =
-    series.slice(0, MAX_SERIES).map((sr, i) => ({
-      key: sr.databaseId,
-      label: sr.name,
-      link: `/databases/${sr.databaseId}`,
-      color: CHART_COLORS[i]!,
-      vals: rawValues[i]!,
+    chartSeries.slice(0, MAX_SERIES).map(({ item, vals }, index) => ({
+      key: item.databaseId,
+      label: item.name,
+      link: `/databases/${item.databaseId}`,
+      color: CHART_COLORS[index]!,
+      vals,
     }));
-  if (series.length > MAX_SERIES) {
-    const rest = rawValues.slice(MAX_SERIES);
+  if (chartSeries.length > MAX_SERIES) {
+    const rest = chartSeries.slice(MAX_SERIES).map((item) => item.vals);
     const summed = new Array<number>(BUCKETS).fill(0);
     for (const vals of rest) for (let b = 0; b < BUCKETS; b++) summed[b]! += vals[b]!;
     bands.push({
       key: "__other",
-      label: `other (${series.length - MAX_SERIES})`,
+      label: `other (${chartSeries.length - MAX_SERIES})`,
       color: CHART_OTHER,
       vals: summed,
     });
@@ -380,38 +461,56 @@ function ClusterVitals({ data, isLoading }: { data?: DashboardVitals; isLoading:
     stacked.push(col);
   }
   const maxStack = Math.max(1, ...stacked.map((col) => col[col.length - 1] ?? 0));
+  const chartMax = maxStack * 1.12;
 
-  const innerW = Math.max(400, containerW || 800);
+  const innerW = Math.max(1, containerW || 800);
   const xFor = (b: number) => (b / (BUCKETS - 1)) * innerW;
-  const yFor = (v: number) => H - PADDING - (v / maxStack) * (H - PADDING * 2);
-
-  const polygons = bands.map((_, i) => {
-    const pointsList: string[] = [];
-    for (let b = 0; b < BUCKETS; b++) {
-      pointsList.push(`${xFor(b).toFixed(1)},${yFor(stacked[b]![i]!).toFixed(1)}`);
-    }
-    for (let b = BUCKETS - 1; b >= 0; b--) {
-      const baseline = i > 0 ? stacked[b]![i - 1]! : 0;
-      pointsList.push(`${xFor(b).toFixed(1)},${yFor(baseline).toFixed(1)}`);
-    }
-    return pointsList.join(" ");
+  const yFor = (v: number) =>
+    PLOT_BOTTOM - (v / chartMax) * (PLOT_BOTTOM - PLOT_TOP);
+  const areaPaths = bands.map((_, index) => {
+    const top = stacked.map((column) => column[index] ?? 0);
+    const bottom = stacked.map((column) => index > 0 ? column[index - 1] ?? 0 : 0);
+    return stackedAreaPath(top, bottom, xFor, yFor);
   });
-
-  const topEdges = bands.map((_, i) => {
-    const pts: string[] = [];
-    for (let b = 0; b < BUCKETS; b++) {
-      pts.push(`${xFor(b).toFixed(1)},${yFor(stacked[b]![i]!).toFixed(1)}`);
-    }
-    return pts.join(" ");
-  });
+  const linePaths = bands.map((_, index) =>
+    smoothLinePath(stacked.map((column) => column[index] ?? 0), xFor, yFor),
+  );
+  const capsuleWidth = Math.max(3, Math.min(10, innerW / BUCKETS - 3));
 
   const totalNow = stacked[BUCKETS - 1]?.[bands.length - 1] ?? 0;
+  const totalThen = stacked[0]?.[bands.length - 1] ?? 0;
+  const totalDelta = totalNow - totalThen;
   const totalsAtHover =
     hoverBucket != null
       ? bands.map((band) => band.vals[hoverBucket]!)
       : bands.map((band) => band.vals[BUCKETS - 1]!);
   const stackTotalAtHover =
     hoverBucket != null ? stacked[hoverBucket]?.[bands.length - 1] ?? 0 : totalNow;
+  const hoverTime = hoverBucket != null
+    ? rangeStart + (hoverBucket + 1) * bucketMs
+    : now;
+  const hoverX = hoverBucket != null ? xFor(hoverBucket) : innerW;
+  const hoverY = yFor(stackTotalAtHover);
+  const tooltipLeft = Math.max(76, Math.min(innerW - 76, hoverX));
+  const capsules = stacked.flatMap((column, bucketIndex) =>
+    bands.flatMap((band, bandIndex) => {
+      const topValue = column[bandIndex] ?? 0;
+      const bottomValue = bandIndex > 0 ? column[bandIndex - 1] ?? 0 : 0;
+      const topY = yFor(topValue);
+      const bottomY = yFor(bottomValue);
+      const height = bottomY - topY;
+      return height > 0
+        ? [{
+            key: `${band.key}-${bucketIndex}`,
+            x: xFor(bucketIndex) - capsuleWidth / 2,
+            y: topY,
+            height,
+            color: band.color,
+            delay: bucketIndex / BUCKETS * 0.22,
+          }]
+        : [];
+    }),
+  );
 
   const onMove = (e: React.MouseEvent<SVGSVGElement>) => {
     const rect = e.currentTarget.getBoundingClientRect();
@@ -424,7 +523,18 @@ function ClusterVitals({ data, isLoading }: { data?: DashboardVitals; isLoading:
   return (
     <div className="flex h-full flex-col justify-between">
       {header}
-      <div ref={containerRef} className="mt-2 w-full flex-1 min-h-[140px]">
+      <div className="mt-4 flex flex-wrap items-end gap-x-3 gap-y-1">
+        <span className="font-mono text-2xl font-semibold tracking-tight tabular-nums text-text">
+          {formatBytes(totalNow)}
+        </span>
+        <span className={`mb-0.5 text-label font-medium ${
+          totalDelta > 0 ? "text-success" : totalDelta < 0 ? "text-warn" : "text-text-subtle"
+        }`}>
+          {formatStorageDelta(totalDelta)} over {rangeLabel(range)}
+        </span>
+      </div>
+
+      <div ref={containerRef} className="relative mt-3 w-full flex-1">
         <svg
           width="100%"
           height={H}
@@ -432,66 +542,169 @@ function ClusterVitals({ data, isLoading }: { data?: DashboardVitals; isLoading:
           preserveAspectRatio="none"
           onMouseMove={onMove}
           onMouseLeave={() => setHoverBucket(null)}
-          style={{ display: "block", cursor: "crosshair" }}
+          className="block cursor-crosshair"
+          role="img"
+          aria-label={`Cluster storage history, ${formatBytes(totalNow)} currently used`}
         >
-          {polygons.map((points, i) => (
-            <polygon key={bands[i]!.key} points={points} fill={bands[i]!.color} fillOpacity="0.32" />
+          <defs>
+            {bands.map((band, index) => (
+              <linearGradient key={band.key} id={`${chartId}-gradient-${index}`} x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stopColor={band.color} stopOpacity="0.42" />
+                <stop offset="100%" stopColor={band.color} stopOpacity="0.04" />
+              </linearGradient>
+            ))}
+            <clipPath id={`${chartId}-reveal`}>
+              <motion.rect
+                key={`${style}-${rangeMs}`}
+                x="0"
+                y="0"
+                height={H}
+                initial={{ width: 0 }}
+                animate={{ width: innerW }}
+                transition={{ duration: 0.65, ease: [0.22, 1, 0.36, 1] }}
+              />
+            </clipPath>
+          </defs>
+
+          {[0, 0.5, 1].map((ratio) => {
+            const y = PLOT_BOTTOM - ratio * (PLOT_BOTTOM - PLOT_TOP);
+            return (
+              <g key={ratio}>
+                <line
+                  x1="0"
+                  x2={innerW}
+                  y1={y}
+                  y2={y}
+                  stroke="rgb(var(--edge))"
+                  strokeWidth="1"
+                  vectorEffect="non-scaling-stroke"
+                />
+                {ratio > 0 && (
+                  <text x="0" y={y - 7} fill="rgb(var(--content-3))" fontSize="11">
+                    {formatBytes(chartMax * ratio)}
+                  </text>
+                )}
+              </g>
+            );
+          })}
+
+          {[0, Math.floor((BUCKETS - 1) / 2), BUCKETS - 1].map((bucketIndex) => (
+            <text
+              key={bucketIndex}
+              x={xFor(bucketIndex)}
+              y={H - 4}
+              textAnchor={bucketIndex === 0 ? "start" : bucketIndex === BUCKETS - 1 ? "end" : "middle"}
+              fill="rgb(var(--content-3))"
+              fontSize="11"
+            >
+              {axisTimeLabel(
+                rangeStart + (bucketIndex + 1) * bucketMs,
+                rangeMs,
+                bucketIndex === BUCKETS - 1,
+              )}
+            </text>
           ))}
-          {topEdges.map((points, i) => (
-            <polyline
-              key={`edge-${bands[i]!.key}`}
-              points={points}
-              fill="none"
-              stroke="rgb(var(--surface-panel))"
-              strokeWidth="2"
-              vectorEffect="non-scaling-stroke"
-            />
-          ))}
-          {topEdges.map((points, i) => (
-            <polyline
-              key={`line-${bands[i]!.key}`}
-              points={points}
-              fill="none"
-              stroke={bands[i]!.color}
-              strokeWidth="1"
-              vectorEffect="non-scaling-stroke"
-            />
-          ))}
+
+          <g clipPath={`url(#${chartId}-reveal)`}>
+            {style === "area" ? (
+              <>
+                {areaPaths.map((path, index) => (
+                  <motion.path
+                    key={`area-${bands[index]!.key}`}
+                    d={path}
+                    fill={`url(#${chartId}-gradient-${index})`}
+                    initial={{ opacity: 0.25 }}
+                    animate={{ opacity: 1 }}
+                    transition={{ duration: 0.48, ease: [0.16, 1, 0.3, 1] }}
+                  />
+                ))}
+                {linePaths.map((path, index) => (
+                  <motion.path
+                    key={`line-${bands[index]!.key}`}
+                    d={path}
+                    fill="none"
+                    stroke={bands[index]!.color}
+                    strokeWidth="1.6"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    vectorEffect="non-scaling-stroke"
+                    initial={{ pathLength: 0 }}
+                    animate={{ pathLength: 1 }}
+                    transition={{ duration: 0.68, ease: [0.16, 1, 0.3, 1] }}
+                  />
+                ))}
+              </>
+            ) : (
+              capsules.map((capsule) => (
+                <motion.rect
+                  key={capsule.key}
+                  x={capsule.x}
+                  width={capsuleWidth}
+                  rx={Math.min(4, capsuleWidth / 2)}
+                  fill={capsule.color}
+                  initial={{ y: PLOT_BOTTOM, height: 0, opacity: 0.3 }}
+                  animate={{ y: capsule.y, height: capsule.height, opacity: 0.86 }}
+                  transition={{
+                    delay: capsule.delay,
+                    duration: 0.46,
+                    ease: [0.22, 1, 0.36, 1],
+                  }}
+                />
+              ))
+            )}
+          </g>
+
           {hoverBucket != null && (
-            <line
-              x1={xFor(hoverBucket)}
-              y1={PADDING}
-              x2={xFor(hoverBucket)}
-              y2={H - PADDING}
-              stroke="rgb(var(--edge-strong))"
-              strokeWidth="1"
-              strokeDasharray="2 3"
-              vectorEffect="non-scaling-stroke"
-              pointerEvents="none"
-            />
+            <g pointerEvents="none">
+              <motion.line
+                x1={hoverX}
+                y1={PLOT_TOP}
+                x2={hoverX}
+                y2={PLOT_BOTTOM}
+                stroke="rgb(var(--content-3))"
+                strokeWidth="1"
+                vectorEffect="non-scaling-stroke"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+              />
+              <motion.circle
+                cx={hoverX}
+                cy={hoverY}
+                r="4"
+                fill="rgb(var(--chart-1))"
+                stroke="rgb(var(--surface-panel))"
+                strokeWidth="2"
+                vectorEffect="non-scaling-stroke"
+                initial={{ scale: 0 }}
+                animate={{ scale: 1 }}
+              />
+            </g>
           )}
         </svg>
+
+        {hoverBucket != null && (
+          <div
+            className="pointer-events-none absolute z-10 min-w-36 -translate-x-1/2 rounded-md border border-border bg-bg-overlay px-3 py-2 shadow-raised"
+            style={{ left: tooltipLeft, top: Math.max(4, hoverY - 58) }}
+          >
+            <div className="text-micro text-text-subtle">{hoverTimeLabel(hoverTime, rangeMs)}</div>
+            <div className="mt-0.5 font-mono text-body font-medium tabular-nums text-text">
+              {formatBytes(stackTotalAtHover)}
+            </div>
+          </div>
+        )}
       </div>
 
-      <div className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-2 border-t border-border pt-3 text-xs">
-        <span className="font-mono text-text-muted">
-          <span className="text-text">{formatBytes(stackTotalAtHover)}</span>
-          {hoverBucket != null && (
-            <span className="ml-2 text-text-subtle">
-              {bucketTimeLabel(hoverBucket, BUCKETS, bucketMs)}
-            </span>
-          )}
-        </span>
-        <span className="text-text-subtle">·</span>
+      <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 border-t border-border pt-3 text-label">
         {bands.map((band, i) => (
           <span key={band.key} className="inline-flex items-center gap-1.5">
             <span
               aria-hidden
-              className="inline-block size-2.5 rounded-sm"
+              className="inline-block size-2 rounded-full"
               style={{ background: band.color }}
             />
             {band.link ? (
-              <Link to={band.link} className="font-mono transition-colors hover:text-accent">
+              <Link to={band.link} className="font-mono text-text-muted transition-colors hover:text-accent">
                 {band.label}
               </Link>
             ) : (
@@ -500,14 +713,73 @@ function ClusterVitals({ data, isLoading }: { data?: DashboardVitals; isLoading:
             <span className="tabular-nums text-text-muted">{formatBytes(totalsAtHover[i] ?? 0)}</span>
           </span>
         ))}
+        {idleCount > 0 && (
+          <span className="text-micro text-text-subtle">
+            {idleCount} idle {idleCount === 1 ? "database" : "databases"} hidden
+          </span>
+        )}
       </div>
     </div>
   );
 }
 
-function bucketTimeLabel(idx: number, total: number, bucketMs: number): string {
-  const msAgo = (total - idx - 1) * bucketMs;
-  if (msAgo < 60 * 60_000) return `${Math.round(msAgo / 60_000)}m ago`;
-  if (msAgo < 24 * 60 * 60_000) return `${Math.round(msAgo / (60 * 60_000))}h ago`;
-  return `${Math.round(msAgo / (24 * 60 * 60_000))}d ago`;
+function smoothLinePath(
+  values: number[],
+  xFor: (index: number) => number,
+  yFor: (value: number) => number,
+): string {
+  const points = values.map((value, index) => ({ x: xFor(index), y: yFor(value) }));
+  if (points.length === 0) return "";
+  let path = `M ${points[0]!.x.toFixed(1)} ${points[0]!.y.toFixed(1)}`;
+  for (let index = 1; index < points.length; index++) {
+    const previous = points[index - 1]!;
+    const current = points[index]!;
+    const midpoint = (previous.x + current.x) / 2;
+    path += ` C ${midpoint.toFixed(1)} ${previous.y.toFixed(1)}, ${midpoint.toFixed(1)} ${current.y.toFixed(1)}, ${current.x.toFixed(1)} ${current.y.toFixed(1)}`;
+  }
+  return path;
+}
+
+function stackedAreaPath(
+  top: number[],
+  bottom: number[],
+  xFor: (index: number) => number,
+  yFor: (value: number) => number,
+): string {
+  const topPath = smoothLinePath(top, xFor, yFor);
+  const reversedBottom = bottom.map((value, index) => ({
+    x: xFor(index),
+    y: yFor(value),
+  })).reverse();
+  if (reversedBottom.length === 0) return topPath;
+  let path = `${topPath} L ${reversedBottom[0]!.x.toFixed(1)} ${reversedBottom[0]!.y.toFixed(1)}`;
+  for (let index = 1; index < reversedBottom.length; index++) {
+    const previous = reversedBottom[index - 1]!;
+    const current = reversedBottom[index]!;
+    const midpoint = (previous.x + current.x) / 2;
+    path += ` C ${midpoint.toFixed(1)} ${previous.y.toFixed(1)}, ${midpoint.toFixed(1)} ${current.y.toFixed(1)}, ${current.x.toFixed(1)} ${current.y.toFixed(1)}`;
+  }
+  return `${path} Z`;
+}
+
+function rangeLabel(range: VitalsRange): string {
+  return range === "1d" ? "24 hours" : `${range.slice(0, -1)} days`;
+}
+
+function formatStorageDelta(value: number): string {
+  if (value === 0) return "No change";
+  return `${value > 0 ? "+" : "−"}${formatBytes(Math.abs(value))}`;
+}
+
+function axisTimeLabel(timestamp: number, rangeMs: number, isNow: boolean): string {
+  if (isNow) return "Now";
+  return new Intl.DateTimeFormat(undefined, rangeMs <= 24 * 60 * 60_000
+    ? { hour: "numeric" }
+    : { month: "short", day: "numeric" }).format(timestamp);
+}
+
+function hoverTimeLabel(timestamp: number, rangeMs: number): string {
+  return new Intl.DateTimeFormat(undefined, rangeMs <= 24 * 60 * 60_000
+    ? { hour: "numeric", minute: "2-digit" }
+    : { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(timestamp);
 }

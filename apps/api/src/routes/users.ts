@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
-import type { ExperienceLevel, Role, User } from "@kilndb/shared";
+import type { ColorTheme, ExperienceLevel, Role, User, VitalsChartStyle } from "@kilndb/shared";
 import { audit, users } from "../db/queries";
 import { hashPassword } from "../auth/password";
 import { requireAuth, requireRole, type AuthVariables } from "../auth/middleware";
@@ -62,6 +62,8 @@ usersRoute.patch("/:id", async (c) => {
     displayName?: string;
     experienceLevel?: ExperienceLevel;
     dataViewEnabled?: boolean;
+    colorTheme?: ColorTheme;
+    vitalsChartStyle?: VitalsChartStyle;
   };
   const target = users.byId(id);
   if (!target) throw new HTTPException(404, { message: "not found" });
@@ -95,6 +97,24 @@ usersRoute.patch("/:id", async (c) => {
       throw new HTTPException(403, { message: "forbidden" });
     }
     users.updateDataView(id, !!body.dataViewEnabled);
+  }
+  if (body.colorTheme !== undefined) {
+    if (!selfOnly && me.role !== "admin") {
+      throw new HTTPException(403, { message: "forbidden" });
+    }
+    if (!["ember", "tide", "grove", "orchid"].includes(body.colorTheme)) {
+      throw new HTTPException(400, { message: "invalid color theme" });
+    }
+    users.updateColorTheme(id, body.colorTheme);
+  }
+  if (body.vitalsChartStyle !== undefined) {
+    if (!selfOnly && me.role !== "admin") {
+      throw new HTTPException(403, { message: "forbidden" });
+    }
+    if (!["area", "capsules"].includes(body.vitalsChartStyle)) {
+      throw new HTTPException(400, { message: "invalid chart style" });
+    }
+    users.updateVitalsChartStyle(id, body.vitalsChartStyle);
   }
   audit.log(me.id, "user.update", id, body);
   return c.json({ user: publicUser(users.byId(id)) });

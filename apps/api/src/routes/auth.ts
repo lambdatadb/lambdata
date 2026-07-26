@@ -48,6 +48,8 @@ authRoute.post("/login", loginIpLimit, loginEmailLimit, async (c) => {
       role: u.role,
       experienceLevel: u.experienceLevel,
       dataViewEnabled: u.dataViewEnabled,
+      colorTheme: u.colorTheme,
+      vitalsChartStyle: u.vitalsChartStyle,
       createdAt: u.createdAt,
       lastLoginAt: Date.now(),
     },

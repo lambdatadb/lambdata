@@ -5,6 +5,7 @@ import { ToastProvider } from "./components/ui/Toast";
 import { api } from "./lib/api";
 import { PageShell } from "./components/layout/PageShell";
 import { Spinner } from "./components/ui/Spinner";
+import { ThemeSync } from "./lib/theme";
 
 import { Login } from "./pages/auth/Login";
 import { SetupWizard } from "./pages/setup/SetupWizard";
@@ -188,6 +189,7 @@ export function App() {
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>
         <AuthProvider>
+          <ThemeSync />
           <ToastProvider>
             <SetupGate>
               <AppRoutes />

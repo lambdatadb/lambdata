@@ -1,5 +1,7 @@
 export type Role = "admin" | "db_owner" | "viewer";
 export type ExperienceLevel = "novice" | "advanced";
+export type ColorTheme = "ember" | "tide" | "grove" | "orchid";
+export type VitalsChartStyle = "area" | "capsules";
 export type DatabaseKind = "standard" | "mirror";
 export type DatabaseStatus = "active" | "suspended" | "deleting";
 export type SnapshotTrigger = "manual" | "scheduled";
@@ -157,6 +159,8 @@ export interface User {
   role: Role;
   experienceLevel: ExperienceLevel;
   dataViewEnabled: boolean;
+  colorTheme: ColorTheme;
+  vitalsChartStyle: VitalsChartStyle;
   createdAt: number;
   lastLoginAt: number | null;
 }
