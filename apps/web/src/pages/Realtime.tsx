@@ -1,119 +1,172 @@
-import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
-import type { RealtimeStatus } from "@kilndb/shared";
-import { api } from "../lib/api";
+import type { RealtimeStatus } from "@lambdata/shared";
+import { Cable, MessagesSquare, RadioTower, RotateCcw, Users } from "lucide-react";
+import { api, absoluteUrl, errorMessage } from "../lib/api";
 import { PageHeader } from "../components/layout/PageShell";
-import { Badge } from "../components/ui/Badge";
-import { Card, CardTitle, SectionLabel } from "../components/ui/Card";
-import { CopyableField } from "../components/ui/CopyableField";
-import { StatTile } from "../components/ui/StatTile";
-import { Table, TBody, TD, TH, THead, TR, TableEmpty, TableSkeleton } from "../components/ui/Table";
+import {
+  Alert,
+  Button,
+  Card,
+  CardContent,
+  CardHeader,
+  CodeBlock,
+  CopyableField,
+  EmptyState,
+  StatTile,
+  StatusDot,
+  TBody,
+  TD,
+  TH,
+  THead,
+  TR,
+  Table,
+  TableSkeleton,
+} from "../components/ui";
+import { pollEvery } from "../lib/queries";
 
 export function Realtime() {
   const statusQuery = useQuery({
     queryKey: ["realtime", "status"],
     queryFn: () => api.get<{ status: RealtimeStatus }>("/realtime/status"),
-    refetchInterval: 5_000,
+    refetchInterval: pollEvery(5_000),
   });
   const status = statusQuery.data?.status;
-  const origin = typeof window === "undefined" ? "localhost:4317" : window.location.host;
-  const protocol = typeof window !== "undefined" && window.location.protocol === "https:" ? "wss" : "ws";
-  const wsUrl = `${protocol}://${origin}/api/realtime/v1/websocket?token=<APP_AUTH_TOKEN>`;
-  const restUrl = "POST /api/realtime/broadcast";
-  const exampleChannel = status?.channels[0]?.name ?? "room:lobby";
-  const totalPresence = useMemo(
-    () => (status ? status.channels.reduce((sum, channel) => sum + channel.presence, 0) : null),
-    [status],
-  );
+  const channels = status?.channels ?? [];
+  const loading = statusQuery.isPending;
+  const secure = typeof window !== "undefined" && window.location.protocol === "https:";
+  const host = typeof window !== "undefined" ? window.location.host : "localhost";
+  const wsUrl = `${secure ? "wss" : "ws"}://${host}/api/realtime/v1/websocket?token=$ACCESS_TOKEN`;
+  const broadcastUrl = absoluteUrl("/api/realtime/broadcast");
+  const channel = channels[0]?.name ?? "room:lobby";
+  const presence = status ? channels.reduce((sum, c) => sum + c.presence, 0) : null;
 
   return (
     <>
       <PageHeader
         title="Realtime"
-        subtitle="WebSocket channels for app broadcasts, presence, and Data API table-change events."
+        subtitle="WebSocket channels for broadcasts, presence and Data API change events. Clients sign in with App Auth tokens."
+        actions={
+          statusQuery.isError ? (
+            <span className="inline-flex items-center gap-2 text-label text-text-muted">
+              <StatusDot tone="danger" /> Status unavailable
+            </span>
+          ) : status ? (
+            <span className="inline-flex items-center gap-2 text-label text-text-muted">
+              <StatusDot tone="success" pulse /> Live, refreshes every 5 s
+            </span>
+          ) : undefined
+        }
       />
+      <div className="space-y-5">
+        {statusQuery.isError && (
+          <Alert
+            variant="danger"
+            title="Could not read realtime status"
+            action={
+              <Button size="xs" variant="secondary" onClick={() => statusQuery.refetch()}>
+                <RotateCcw aria-hidden /> Retry
+              </Button>
+            }
+          >
+            {errorMessage(statusQuery.error, "The server did not answer.")}
+          </Alert>
+        )}
+        <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+          <StatTile label="Connections" icon={Cable} loading={loading} value={status?.connections ?? null} />
+          <StatTile label="Channels" icon={RadioTower} loading={loading} value={status ? channels.length : null} />
+          <StatTile label="Presence" icon={Users} loading={loading} value={presence} />
+          <StatTile label="Messages sent" icon={MessagesSquare} loading={loading} value={status?.messagesSent ?? null} />
+        </div>
 
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-        <StatTile label="Connections" value={status?.connections} icon="sensors" />
-        <StatTile label="Channels" value={status ? status.channels.length : null} icon="hub" />
-        <StatTile label="Presence" value={totalPresence} icon="group" />
-      </div>
-
-      <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_380px] gap-5 mt-5">
-        <Card className="p-0 overflow-hidden">
-          <div className="p-5 border-b border-border flex items-start justify-between gap-4">
-            <div>
-              <SectionLabel>Channels</SectionLabel>
-              <p className="text-body text-text-muted">
-                Clients authenticate with App Auth bearer tokens, subscribe to named channels, and exchange low-latency JSON messages.
-              </p>
-            </div>
-            <Badge tone="accent">WebSocket</Badge>
-          </div>
-
-          <Table flush>
-            <THead>
-              <tr>
-                <TH>Channel</TH>
-                <TH className="text-right">Subscribers</TH>
-                <TH className="text-right">Presence</TH>
-              </tr>
-            </THead>
-            <TBody>
-              {statusQuery.isLoading ? (
-                <TableSkeleton rows={4} cols={3} />
-              ) : !status || status.channels.length === 0 ? (
-                <TableEmpty colSpan={3}>
-                  No active realtime channels. Subscribe with a WebSocket client or send a REST broadcast to create activity.
-                </TableEmpty>
-              ) : (
-                status.channels.map((channel) => (
-                  <TR key={channel.name}>
-                    <TD className="font-mono text-label">{channel.name}</TD>
-                    <TD numeric className="text-label text-text-muted">{channel.subscribers}</TD>
-                    <TD numeric className="text-label text-text-muted">{channel.presence}</TD>
+        <div className="grid grid-cols-1 items-start gap-5 xl:grid-cols-[minmax(0,1fr)_24rem]">
+          <Card flush>
+            <CardHeader
+              divided
+              title="Active channels"
+              description="Channels exist while at least one client is subscribed."
+            />
+            {statusQuery.isError ? (
+              <EmptyState
+                variant="bare"
+                size="sm"
+                icon={RadioTower}
+                title="Channels unavailable"
+                description="The status request failed. Retry from the message above."
+              />
+            ) : !loading && channels.length === 0 ? (
+              <EmptyState
+                variant="bare"
+                icon={RadioTower}
+                title="No active channels"
+                description="Subscribe from a WebSocket client or send a REST broadcast, and the channel shows up here."
+              />
+            ) : (
+              <Table flush caption="Active channels">
+                <THead>
+                  <TR>
+                    <TH>Channel</TH>
+                    <TH numeric>Subscribers</TH>
+                    <TH numeric className="hidden sm:table-cell">
+                      Presence
+                    </TH>
                   </TR>
-                ))
-              )}
-            </TBody>
-          </Table>
-        </Card>
-
-        <div className="space-y-5">
-          <Card>
-            <div className="flex items-center justify-between">
-              <CardTitle>Connect</CardTitle>
-              <Badge tone="accent">App Auth</Badge>
-            </div>
-            <div className="mt-4 space-y-3">
-              <CopyableField label="WebSocket" value={wsUrl} />
-              <CopyableField label="Broadcast REST" value={restUrl} />
-              <CopyableField label="Table channel" value="db:<database>:table:<table>" />
-            </div>
+                </THead>
+                <TBody>
+                  {loading ? (
+                    <TableSkeleton rows={3} cols={3} />
+                  ) : (
+                    channels.map((c) => (
+                      <TR key={c.name}>
+                        <TD mono className="text-text">
+                          {c.name}
+                        </TD>
+                        <TD numeric>{c.subscribers}</TD>
+                        <TD numeric className="hidden text-text-muted sm:table-cell">
+                          {c.presence}
+                        </TD>
+                      </TR>
+                    ))
+                  )}
+                </TBody>
+              </Table>
+            )}
           </Card>
 
           <Card>
-            <SectionLabel>Client messages</SectionLabel>
-            <pre className="text-label leading-relaxed font-mono text-text-muted whitespace-pre-wrap rounded-md bg-bg border border-border p-3 overflow-x-auto">
-{`{ "type": "subscribe", "channel": "${exampleChannel}" }
-{ "type": "broadcast", "channel": "${exampleChannel}", "event": "message", "payload": { "text": "hello" } }
-{ "type": "presence", "channel": "${exampleChannel}", "state": { "online": true } }`}
-            </pre>
+            <CardHeader title="Connect" description="Pass an App Auth access token; console sessions are not accepted." />
+            <div className="space-y-4">
+              <CopyableField label="WebSocket" value={wsUrl} copyLabel="WebSocket URL" />
+              <CopyableField label="REST broadcast" value={broadcastUrl} copyLabel="broadcast URL" />
+              <CopyableField label="Table change channel" value="db:<database>:table:<table>" copyLabel="table channel pattern" />
+            </div>
           </Card>
+        </div>
 
-          <Card>
-            <SectionLabel>REST broadcast</SectionLabel>
-            <pre className="text-label leading-relaxed font-mono text-text-muted whitespace-pre-wrap rounded-md bg-bg border border-border p-3 overflow-x-auto">
-{`{
-  "messages": [
-    {
-      "channel": "${exampleChannel}",
-      "event": "kilndb.demo",
-      "payload": { "ok": true }
-    }
-  ]
-}`}
-            </pre>
+        <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
+          <Card flush>
+            <CardHeader title="Client messages" description="Send these JSON frames over the socket." />
+            <CardContent className="pt-0">
+              <CodeBlock
+                language="json"
+                wrap
+                code={`{ "type": "subscribe", "channel": "${channel}" }
+{ "type": "broadcast", "channel": "${channel}", "event": "message", "payload": { "text": "hello" } }
+{ "type": "presence", "channel": "${channel}", "state": { "online": true } }`}
+              />
+            </CardContent>
+          </Card>
+          <Card flush>
+            <CardHeader title="Broadcast over REST" description="Up to 100 messages per request, from a server or a script." />
+            <CardContent className="pt-0">
+              <CodeBlock
+                language="shell"
+                wrap
+                code={`curl -X POST "${broadcastUrl}" \\
+  -H "Authorization: Bearer $ACCESS_TOKEN" \\
+  -H "Content-Type: application/json" \\
+  --data '{"messages":[{"channel":"${channel}","event":"lambdata.demo","payload":{"ok":true}}]}'`}
+              />
+            </CardContent>
           </Card>
         </div>
       </div>

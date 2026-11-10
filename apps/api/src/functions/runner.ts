@@ -1,3 +1,5 @@
+import { pathToFileURL } from "node:url";
+
 type InvokePayload = {
   functionName: string;
   request: {
@@ -18,19 +20,27 @@ type InvokeResult = {
   error: string | null;
 };
 
+const MAX_LOG_CHARS = 256_000;
 const entrypoint = Bun.argv[2];
-const inputPath = Bun.argv[3];
 const logs: string[] = [];
+let logChars = 0;
+let droppedLogs = 0;
 
-for (const level of ["log", "info", "warn", "error"] as const) {
+for (const level of ["log", "info", "warn", "error", "debug"] as const) {
   console[level] = (...args: unknown[]) => {
-    logs.push(`[${level}] ${args.map(formatLogValue).join(" ")}`);
+    const line = `[${level}] ${args.map(formatLogValue).join(" ")}`;
+    if (logChars + line.length > MAX_LOG_CHARS) {
+      droppedLogs++;
+      return;
+    }
+    logChars += line.length;
+    logs.push(line);
   };
 }
 
 try {
-  if (!entrypoint || !inputPath) throw new Error("runner requires entrypoint and payload path");
-  const payload = await Bun.file(inputPath).json() as InvokePayload;
+  if (!entrypoint) throw new Error("runner requires an entrypoint");
+  const payload = (await Bun.stdin.json()) as InvokePayload;
   for (const [key, value] of Object.entries(payload.env)) {
     process.env[key] = value;
   }
@@ -62,7 +72,7 @@ try {
     status: response.status,
     headers: Array.from(response.headers.entries()),
     bodyBase64: responseBody,
-    logs,
+    logs: finalLogs(),
     error: null,
   });
 } catch (err) {
@@ -71,9 +81,13 @@ try {
     status: 500,
     headers: [["content-type", "application/json"]],
     bodyBase64: Buffer.from(JSON.stringify({ error: "function invocation failed" })).toString("base64"),
-    logs,
+    logs: finalLogs(),
     error: err instanceof Error ? err.message : String(err),
   });
+}
+
+function finalLogs(): string[] {
+  return droppedLogs > 0 ? [...logs, `[warn] ${droppedLogs} more log lines were dropped`] : logs;
 }
 
 function writeResult(result: InvokeResult): void {
@@ -100,4 +114,3 @@ async function toResponse(value: unknown): Promise<Response> {
   }
   return Response.json(value);
 }
-import { pathToFileURL } from "node:url";

@@ -1,4 +1,4 @@
-import type { DatabaseCredentials } from "@kilndb/shared";
+import type { DatabaseCredentials } from "@lambdata/shared";
 
 export function buildConnectionStrings(p: {
   host: string;

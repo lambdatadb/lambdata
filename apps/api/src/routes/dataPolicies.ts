@@ -1,52 +1,56 @@
 import mysql from "mysql2/promise";
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
-import type { DataApiPolicy, User } from "@kilndb/shared";
-import { audit, dataApiPolicies, databases } from "../db/queries";
+import { z } from "zod";
+import type { DataApiPolicy } from "@lambdata/shared";
+import { audit, dataApiPolicies } from "../db/queries";
+import { dataAccess } from "../db/queries/dataAccess";
 import { requireAuth, type AuthVariables } from "../auth/middleware";
+import { baseTablesBySchema, requireDataApiDatabase, virtualPolicy } from "../auth/dataAccess";
 import { withRootConnection } from "../mariadb/controller";
+import { isSafeIdent } from "../util/ident";
+import { parseJson } from "../util/validate";
+
+const policyPatchSchema = z.object({
+  selectEnabled: z.boolean().optional(),
+  insertEnabled: z.boolean().optional(),
+  updateEnabled: z.boolean().optional(),
+  deleteEnabled: z.boolean().optional(),
+  ownerColumn: z.string().nullable().optional(),
+});
 
 export const dataPoliciesRoute = new Hono<{ Variables: AuthVariables }>();
 
 dataPoliciesRoute.use("*", requireAuth);
 
 dataPoliciesRoute.get("/:databaseName", async (c) => {
-  const database = requireDatabase(c.req.param("databaseName"), c.get("user"));
-  const tables = await tableNames(database.name);
+  const database = requireDataApiDatabase(c.get("user"), c.req.param("databaseName"), "read", true);
+  const tables = (await baseTablesBySchema([database.name])).get(database.name) ?? [];
+  const mode = dataAccess.mode(database.id);
   const stored = new Map(dataApiPolicies.list(database.id).map((policy) => [policy.tableName, policy]));
   return c.json({
-    policies: tables.map((tableName) => stored.get(tableName) ?? defaultPolicy(database.id, tableName)),
+    policies: tables.map((tableName) => stored.get(tableName) ?? virtualPolicy(database.id, tableName, mode)),
   });
 });
 
 dataPoliciesRoute.get("/:databaseName/:tableName", async (c) => {
-  const database = requireDatabase(c.req.param("databaseName"), c.get("user"));
+  const database = requireDataApiDatabase(c.get("user"), c.req.param("databaseName"), "read", true);
   const tableName = validateTableName(c.req.param("tableName"));
-  await assertTableExists(database.name, tableName);
-  return c.json({
-    policy: dataApiPolicies.byTable(database.id, tableName) ?? defaultPolicy(database.id, tableName),
-  });
+  await tableColumns(database.name, tableName);
+  return c.json({ policy: effectivePolicy(database.id, tableName) });
 });
 
 dataPoliciesRoute.patch("/:databaseName/:tableName", async (c) => {
   const user = c.get("user");
-  if (user.role === "viewer") throw new HTTPException(403, { message: "read-only role" });
-  const database = requireDatabase(c.req.param("databaseName"), user);
+  const database = requireDataApiDatabase(user, c.req.param("databaseName"), "write", true);
   const tableName = validateTableName(c.req.param("tableName"));
+  const body = await parseJson(c, policyPatchSchema);
   const columns = await tableColumns(database.name, tableName);
-  const existing = dataApiPolicies.byTable(database.id, tableName) ?? defaultPolicy(database.id, tableName);
-  const body = (await c.req.json()) as Partial<{
-    selectEnabled: boolean;
-    insertEnabled: boolean;
-    updateEnabled: boolean;
-    deleteEnabled: boolean;
-    ownerColumn: string | null;
-  }>;
+  const existing = effectivePolicy(database.id, tableName);
   const ownerColumn = body.ownerColumn === undefined
     ? existing.ownerColumn
     : normalizeOwnerColumn(body.ownerColumn, columns);
-
-  dataApiPolicies.upsert({
+  const next = {
     databaseId: database.id,
     tableName,
     selectEnabled: body.selectEnabled ?? existing.selectEnabled,
@@ -54,10 +58,15 @@ dataPoliciesRoute.patch("/:databaseName/:tableName", async (c) => {
     updateEnabled: body.updateEnabled ?? existing.updateEnabled,
     deleteEnabled: body.deleteEnabled ?? existing.deleteEnabled,
     ownerColumn,
-  });
+  };
+  dataApiPolicies.upsert(next);
   audit.log(user.id, "data_api.policy.update", database.id, {
     database: database.name,
     table: tableName,
+    selectEnabled: next.selectEnabled,
+    insertEnabled: next.insertEnabled,
+    updateEnabled: next.updateEnabled,
+    deleteEnabled: next.deleteEnabled,
     ownerColumn,
   });
   return c.json({ policy: dataApiPolicies.byTable(database.id, tableName) });
@@ -65,45 +74,25 @@ dataPoliciesRoute.patch("/:databaseName/:tableName", async (c) => {
 
 dataPoliciesRoute.delete("/:databaseName/:tableName", (c) => {
   const user = c.get("user");
-  if (user.role === "viewer") throw new HTTPException(403, { message: "read-only role" });
-  const database = requireDatabase(c.req.param("databaseName"), user);
+  const database = requireDataApiDatabase(user, c.req.param("databaseName"), "write", true);
   const tableName = validateTableName(c.req.param("tableName"));
   dataApiPolicies.delete(database.id, tableName);
   audit.log(user.id, "data_api.policy.reset", database.id, {
     database: database.name,
     table: tableName,
   });
-  return c.json({ policy: defaultPolicy(database.id, tableName) });
+  return c.json({ policy: virtualPolicy(database.id, tableName, dataAccess.mode(database.id)) });
 });
 
-function requireDatabase(databaseName: string, user: User): NonNullable<ReturnType<typeof databases.byName>> {
-  if (!safeIdent(databaseName)) throw new HTTPException(400, { message: "database must be a safe identifier" });
-  const database = databases.byName(databaseName);
-  if (!database) throw new HTTPException(404, { message: "database not found" });
-  if (database.status !== "active") throw new HTTPException(409, { message: "database not active" });
-  if (user.role === "db_owner" && database.ownerUserId !== user.id) {
-    throw new HTTPException(403, { message: "not database owner" });
+function effectivePolicy(databaseId: string, tableName: string): DataApiPolicy {
+  return dataApiPolicies.byTable(databaseId, tableName) ?? virtualPolicy(databaseId, tableName, dataAccess.mode(databaseId));
+}
+
+function validateTableName(tableName: string | undefined): string {
+  if (!tableName || !isSafeIdent(tableName)) {
+    throw new HTTPException(400, { message: "table must be a safe identifier" });
   }
-  return database;
-}
-
-function validateTableName(tableName: string): string {
-  if (!safeIdent(tableName)) throw new HTTPException(400, { message: "table must be a safe identifier" });
   return tableName;
-}
-
-async function tableNames(databaseName: string): Promise<string[]> {
-  return withRootConnection(async (conn) => {
-    const [rows] = await conn.query<mysql.RowDataPacket[]>(
-      `SELECT table_name AS name
-         FROM information_schema.tables
-        WHERE table_schema = ?
-          AND table_type = 'BASE TABLE'
-        ORDER BY table_name ASC`,
-      [databaseName],
-    );
-    return rows.map((row) => String(row.name));
-  });
 }
 
 async function tableColumns(databaseName: string, tableName: string): Promise<string[]> {
@@ -121,34 +110,12 @@ async function tableColumns(databaseName: string, tableName: string): Promise<st
   });
 }
 
-async function assertTableExists(databaseName: string, tableName: string): Promise<void> {
-  await tableColumns(databaseName, tableName);
-}
-
-function normalizeOwnerColumn(ownerColumn: string | null | undefined, columns: string[]): string | null {
+function normalizeOwnerColumn(ownerColumn: string | null, columns: string[]): string | null {
   const value = ownerColumn?.trim() || null;
   if (!value) return null;
-  if (!safeIdent(value)) throw new HTTPException(400, { message: "owner column must be a safe identifier" });
+  if (!isSafeIdent(value)) throw new HTTPException(400, { message: "owner column must be a safe identifier" });
   if (!columns.includes(value)) {
     throw new HTTPException(400, { message: `owner column ${value} does not exist on table` });
   }
   return value;
-}
-
-function defaultPolicy(databaseId: string, tableName: string): DataApiPolicy {
-  return {
-    databaseId,
-    tableName,
-    selectEnabled: true,
-    insertEnabled: true,
-    updateEnabled: true,
-    deleteEnabled: true,
-    ownerColumn: null,
-    createdAt: null,
-    updatedAt: null,
-  };
-}
-
-function safeIdent(value: string): boolean {
-  return /^[a-zA-Z0-9_]+$/.test(value);
 }

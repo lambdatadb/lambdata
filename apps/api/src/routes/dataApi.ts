@@ -1,13 +1,23 @@
 import mysql from "mysql2/promise";
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
-import type { AppAuthUser, DataApiOperation, DataApiPolicy } from "@kilndb/shared";
+import { z } from "zod";
+import type { AppAuthUser, DataApiOperation, Database } from "@lambdata/shared";
 import { appUserFromBearer } from "../auth/appBearer";
-import { audit, dataApiPolicies, databases } from "../db/queries";
+import { decideDataAccess, recordMissingPolicyDenial } from "../auth/dataAccess";
+import { audit, databases } from "../db/queries";
 import { withRootConnection } from "../mariadb/controller";
+import { beginWrite, isWriteFenced } from "../mariadb/writeFence";
 import { publishDatabaseChange } from "../realtime/hub";
+import { assertDiskRoom, DISK_CACHE_MS } from "../util/disk";
+import { isSafeIdent, quoteIdent as quoteSafeIdent } from "../util/ident";
+import { parseValue, readJson } from "../util/validate";
 
-type FilterOp = "eq" | "neq" | "gt" | "gte" | "lt" | "lte" | "like" | "ilike" | "in";
+const FILTER_OPS = ["eq", "neq", "gt", "gte", "lt", "lte", "like", "ilike", "in"] as const;
+type FilterOp = (typeof FILTER_OPS)[number];
+
+const RESERVED_PARAMS = new Set(["select", "order", "limit", "offset"]);
+const MAX_INSERT_ROWS = 100;
 
 interface Filter {
   column: string;
@@ -22,20 +32,29 @@ interface TableColumn {
   dataType: string;
 }
 
+interface TableContext {
+  database: Database;
+  tableName: string;
+  columns: TableColumn[];
+  ownerColumn: string | null;
+}
+
+const insertRowSchema = z.record(z.string(), z.unknown(), { error: "JSON object or object array required" });
+const rowListSchema = z
+  .array(z.record(z.string(), z.unknown(), { error: "each inserted row must be a JSON object" }))
+  .min(1, "JSON object or object array required")
+  .max(MAX_INSERT_ROWS, `at most ${MAX_INSERT_ROWS} rows per insert`);
+const updateSchema = z.record(z.string(), z.unknown(), { error: "JSON object required" });
+
 export const dataApiRoute = new Hono<{ Variables: { appUser: AppAuthUser } }>();
 
-dataApiRoute.use("/:databaseName/:tableName/*", async (c, next) => {
-  c.set("appUser", await appUserFromBearer(c.req.header("Authorization")));
-  await next();
-});
-dataApiRoute.use("/:databaseName/:tableName", async (c, next) => {
+dataApiRoute.use("*", async (c, next) => {
   c.set("appUser", await appUserFromBearer(c.req.header("Authorization")));
   await next();
 });
 
 dataApiRoute.get("/:databaseName/:tableName", async (c) => {
-  const ctx = await tableContext(c.req.param("databaseName"), c.req.param("tableName"));
-  assertPolicyAllows(ctx, "select");
+  const ctx = await authorizedTable(c.req.param("databaseName"), c.req.param("tableName"), "select");
   const select = parseSelect(c.req.query("select"), ctx.columns);
   const filters = [
     ...parseFilters(new URL(c.req.url).searchParams, ctx.columns),
@@ -56,22 +75,24 @@ dataApiRoute.get("/:databaseName/:tableName", async (c) => {
   values.push(limit, offset);
 
   return withRootConnection(async (conn) => {
-    const [rows] = await conn.query<mysql.RowDataPacket[]>(sql, values);
+    const [rows] = await runClientQuery(() => conn.query<mysql.RowDataPacket[]>({ sql, values, supportBigNumbers: true }));
     return c.json({ data: rows.map(rowObject), count: rows.length });
   });
 });
 
+const WRITE_ACTION = "write rows through the Data API";
+
+function assertWriteRoom(): void {
+  assertDiskRoom(WRITE_ACTION, 0, { cachedMs: DISK_CACHE_MS });
+}
+
 dataApiRoute.post("/:databaseName/:tableName", async (c) => {
-  const ctx = await tableContext(c.req.param("databaseName"), c.req.param("tableName"));
-  assertPolicyAllows(ctx, "insert");
-  const body = await c.req.json().catch(() => null);
-  const payload = Array.isArray(body) ? body : [body];
-  if (payload.length === 0 || payload.some((row) => !isRecord(row))) {
-    throw new HTTPException(400, { message: "JSON object or object array required" });
-  }
-  if (payload.length > 100) {
-    throw new HTTPException(400, { message: "at most 100 rows per insert" });
-  }
+  const ctx = await authorizedTable(c.req.param("databaseName"), c.req.param("tableName"), "insert");
+  assertWriteRoom();
+  const body = await readJson(c);
+  const payload = Array.isArray(body)
+    ? parseValue(rowListSchema, body, "insert body")
+    : [parseValue(insertRowSchema, isRecord(body) ? body : null, "insert body")];
 
   const columnSet = new Set(ctx.columns.map((col) => col.name));
   const columns = Object.keys(payload[0]!).filter((col) => columnSet.has(col));
@@ -79,21 +100,22 @@ dataApiRoute.post("/:databaseName/:tableName", async (c) => {
     throw new HTTPException(400, { message: "no writable table columns in payload" });
   }
   for (const row of payload) {
-    const rowCols = Object.keys(row as Record<string, unknown>).filter((col) => columnSet.has(col));
+    const rowCols = Object.keys(row).filter((col) => columnSet.has(col));
     if (rowCols.length !== columns.length || !columns.every((col) => rowCols.includes(col))) {
       throw new HTTPException(400, { message: "all inserted rows must use the same table columns" });
     }
   }
-  assertOwnerInsert(ctx, c.get("appUser"), payload);
+  const user = c.get("appUser");
+  assertOwnerInsert(ctx, user, payload);
 
-  const placeholders = payload
-    .map(() => `(${columns.map(() => "?").join(", ")})`)
-    .join(", ");
-  const values = payload.flatMap((row) => columns.map((col) => (row as Record<string, unknown>)[col]));
+  const placeholders = payload.map(() => `(${columns.map(() => "?").join(", ")})`).join(", ");
+  const values = payload.flatMap((row) => columns.map((col) => columnValue(row[col])));
   const sql = `INSERT INTO ${tableRef(ctx)} (${columns.map(quoteIdent).join(", ")}) VALUES ${placeholders}`;
 
   return withRootConnection(async (conn) => {
-    const [result] = await conn.query<mysql.ResultSetHeader>(sql, values);
+    const [result] = await whileWriting(ctx.database.id, () =>
+      runClientQuery(() => conn.query<mysql.ResultSetHeader>({ sql, values, supportBigNumbers: true })),
+    );
     const affectedRows = result.affectedRows;
     audit.log(null, "data_api.insert", ctx.database.id, {
       database: ctx.database.name,
@@ -104,7 +126,8 @@ dataApiRoute.post("/:databaseName/:tableName", async (c) => {
       database: ctx.database.name,
       table: ctx.tableName,
       operation: "INSERT",
-      sender: c.get("appUser"),
+      sender: user,
+      ownerId: ctx.ownerColumn ? user.id : null,
       payload: {
         affectedRows,
         insertId: result.insertId,
@@ -116,23 +139,24 @@ dataApiRoute.post("/:databaseName/:tableName", async (c) => {
 });
 
 dataApiRoute.patch("/:databaseName/:tableName", async (c) => {
-  const ctx = await tableContext(c.req.param("databaseName"), c.req.param("tableName"));
-  assertPolicyAllows(ctx, "update");
-  const body = await c.req.json().catch(() => null);
-  if (!isRecord(body)) throw new HTTPException(400, { message: "JSON object required" });
-  assertOwnerUpdate(ctx, c.get("appUser"), body);
+  const ctx = await authorizedTable(c.req.param("databaseName"), c.req.param("tableName"), "update");
+  assertWriteRoom();
+  const body = await readJson(c);
+  const patch = parseValue(updateSchema, isRecord(body) ? body : null, "update body");
+  const user = c.get("appUser");
+  assertOwnerUpdate(ctx, user, patch);
 
   const columnSet = new Set(ctx.columns.map((col) => col.name));
-  const writable = Object.entries(body).filter(([col]) => columnSet.has(col));
+  const writable = Object.entries(patch).filter(([col]) => columnSet.has(col));
   if (writable.length === 0) {
     throw new HTTPException(400, { message: "no writable table columns in payload" });
   }
 
   const filters = [
     ...parseFilters(new URL(c.req.url).searchParams, ctx.columns),
-    ...ownerFilters(ctx, c.get("appUser")),
+    ...ownerFilters(ctx, user),
   ];
-  const values: unknown[] = writable.map(([, value]) => value);
+  const values: unknown[] = writable.map(([, value]) => columnValue(value));
   const where = buildWhere(filters, values);
   const limit = boundedInt(c.req.query("limit"), 0, 1000);
   const sql = [
@@ -142,7 +166,9 @@ dataApiRoute.patch("/:databaseName/:tableName", async (c) => {
   ].filter(Boolean).join(" ");
 
   return withRootConnection(async (conn) => {
-    const [result] = await conn.query<mysql.ResultSetHeader>(sql, values);
+    const [result] = await whileWriting(ctx.database.id, () =>
+      runClientQuery(() => conn.query<mysql.ResultSetHeader>({ sql, values, supportBigNumbers: true })),
+    );
     const affectedRows = result.affectedRows;
     audit.log(null, "data_api.update", ctx.database.id, {
       database: ctx.database.name,
@@ -153,11 +179,12 @@ dataApiRoute.patch("/:databaseName/:tableName", async (c) => {
       database: ctx.database.name,
       table: ctx.tableName,
       operation: "UPDATE",
-      sender: c.get("appUser"),
+      sender: user,
+      ownerId: ctx.ownerColumn ? user.id : null,
       payload: {
         affectedRows,
         changedRows: result.changedRows,
-        set: body,
+        set: patch,
         filters: filters.map((filter) => ({ ...filter })),
       },
     });
@@ -166,11 +193,11 @@ dataApiRoute.patch("/:databaseName/:tableName", async (c) => {
 });
 
 dataApiRoute.delete("/:databaseName/:tableName", async (c) => {
-  const ctx = await tableContext(c.req.param("databaseName"), c.req.param("tableName"));
-  assertPolicyAllows(ctx, "delete");
+  const ctx = await authorizedTable(c.req.param("databaseName"), c.req.param("tableName"), "delete");
+  const user = c.get("appUser");
   const filters = [
     ...parseFilters(new URL(c.req.url).searchParams, ctx.columns),
-    ...ownerFilters(ctx, c.get("appUser")),
+    ...ownerFilters(ctx, user),
   ];
   const values: unknown[] = [];
   const where = buildWhere(filters, values);
@@ -182,7 +209,9 @@ dataApiRoute.delete("/:databaseName/:tableName", async (c) => {
   ].filter(Boolean).join(" ");
 
   return withRootConnection(async (conn) => {
-    const [result] = await conn.query<mysql.ResultSetHeader>(sql, values);
+    const [result] = await whileWriting(ctx.database.id, () =>
+      runClientQuery(() => conn.query<mysql.ResultSetHeader>({ sql, values, supportBigNumbers: true })),
+    );
     const affectedRows = result.affectedRows;
     audit.log(null, "data_api.delete", ctx.database.id, {
       database: ctx.database.name,
@@ -193,7 +222,8 @@ dataApiRoute.delete("/:databaseName/:tableName", async (c) => {
       database: ctx.database.name,
       table: ctx.tableName,
       operation: "DELETE",
-      sender: c.get("appUser"),
+      sender: user,
+      ownerId: ctx.ownerColumn ? user.id : null,
       payload: {
         affectedRows,
         filters: filters.map((filter) => ({ ...filter })),
@@ -203,20 +233,39 @@ dataApiRoute.delete("/:databaseName/:tableName", async (c) => {
   });
 });
 
-async function tableContext(databaseName: string, tableName: string): Promise<{
-  database: NonNullable<ReturnType<typeof databases.byName>>;
-  tableName: string;
-  columns: TableColumn[];
-  policy: DataApiPolicy | null;
-}> {
-  if (!safeIdent(databaseName) || !safeIdent(tableName)) {
+const FENCED_RETRY_SECONDS = 5;
+
+export const FENCED_WRITE_MESSAGE = `This database is briefly closed to writes while LambData replaces its contents (a rollback, import or sync). Retry in ${FENCED_RETRY_SECONDS} seconds.`;
+
+function assertWritable(databaseId: string): void {
+  if (!isWriteFenced(databaseId)) return;
+  throw new HTTPException(503, { message: FENCED_WRITE_MESSAGE });
+}
+
+async function whileWriting<T>(databaseId: string, write: () => Promise<T>): Promise<T> {
+  assertWritable(databaseId);
+  const done = beginWrite(databaseId);
+  try {
+    return await write();
+  } finally {
+    done();
+  }
+}
+
+async function authorizedTable(
+  databaseName: string,
+  tableName: string,
+  operation: DataApiOperation,
+): Promise<TableContext> {
+  if (!isSafeIdent(databaseName) || !isSafeIdent(tableName)) {
     throw new HTTPException(400, { message: "database and table must be safe identifiers" });
   }
   const database = databases.byName(databaseName);
   if (!database) throw new HTTPException(404, { message: "database not found" });
   if (database.status !== "active") throw new HTTPException(409, { message: "database not active" });
+  if (operation !== "select") assertWritable(database.id);
 
-  return withRootConnection(async (conn) => {
+  const columns = await withRootConnection(async (conn) => {
     const [rows] = await conn.query<mysql.RowDataPacket[]>(
       `SELECT column_name AS name,
               is_nullable AS nullable,
@@ -228,19 +277,40 @@ async function tableContext(databaseName: string, tableName: string): Promise<{
         ORDER BY ordinal_position ASC`,
       [database.name, tableName],
     );
-    if (rows.length === 0) throw new HTTPException(404, { message: "table not found" });
-    return {
-      database,
-      tableName,
-      policy: dataApiPolicies.byTable(database.id, tableName),
-      columns: rows.map((row) => ({
-        name: String(row.name),
-        nullable: row.nullable === "YES",
-        primary: row.column_key === "PRI",
-        dataType: String(row.data_type),
-      })),
-    };
+    return rows.map((row) => ({
+      name: String(row.name),
+      nullable: row.nullable === "YES",
+      primary: row.column_key === "PRI",
+      dataType: String(row.data_type).toLowerCase(),
+    }));
   });
+  if (columns.length === 0) throw new HTTPException(404, { message: "table not found" });
+
+  const decision = decideDataAccess(database, tableName, operation);
+  if (!decision.allowed) {
+    if (decision.reason === "no_policy") recordMissingPolicyDenial(database, tableName, operation);
+    throw new HTTPException(403, { message: decision.message });
+  }
+  if (decision.ownerColumn && !columns.some((col) => col.name === decision.ownerColumn)) {
+    throw new HTTPException(409, {
+      message: `policy owner column ${decision.ownerColumn} does not exist on ${tableName}`,
+    });
+  }
+  return { database, tableName, columns, ownerColumn: decision.ownerColumn };
+}
+
+async function runClientQuery<T>(query: () => Promise<T>): Promise<T> {
+  try {
+    return await query();
+  } catch (err) {
+    const sqlState = (err as { sqlState?: unknown }).sqlState;
+    const message = (err as { sqlMessage?: unknown }).sqlMessage;
+    if (typeof sqlState === "string" && typeof message === "string") {
+      if (sqlState.startsWith("23")) throw new HTTPException(409, { message });
+      if (sqlState.startsWith("22")) throw new HTTPException(400, { message });
+    }
+    throw err;
+  }
 }
 
 function parseSelect(raw: string | undefined, columns: TableColumn[]): string[] {
@@ -254,16 +324,20 @@ function parseSelect(raw: string | undefined, columns: TableColumn[]): string[] 
   return selected;
 }
 
+function isFilterOp(value: string): value is FilterOp {
+  return (FILTER_OPS as readonly string[]).includes(value);
+}
+
 function parseFilters(params: URLSearchParams, columns: TableColumn[]): Filter[] {
   const allowed = new Set(columns.map((col) => col.name));
   const filters: Filter[] = [];
   for (const [key, value] of params.entries()) {
-    if (["select", "order", "limit", "offset"].includes(key)) continue;
+    if (RESERVED_PARAMS.has(key)) continue;
     if (!allowed.has(key)) throw new HTTPException(400, { message: `unknown filter column: ${key}` });
     const dot = value.indexOf(".");
     if (dot <= 0) throw new HTTPException(400, { message: `invalid filter for ${key}` });
-    const op = value.slice(0, dot) as FilterOp;
-    if (!["eq", "neq", "gt", "gte", "lt", "lte", "like", "ilike", "in"].includes(op)) {
+    const op = value.slice(0, dot);
+    if (!isFilterOp(op)) {
       throw new HTTPException(400, { message: `unsupported filter op: ${op}` });
     }
     filters.push({ column: key, op, value: value.slice(dot + 1) });
@@ -286,46 +360,15 @@ function parseOrder(raw: string | undefined, columns: TableColumn[]): null | {
   return { column, direction: direction === "desc" ? "DESC" : "ASC" };
 }
 
-function assertPolicyAllows(
-  ctx: { tableName: string; columns: TableColumn[]; policy: DataApiPolicy | null },
-  operation: DataApiOperation,
-): void {
-  const policy = ctx.policy;
-  if (!policy) return;
-  const allowed = operation === "select"
-    ? policy.selectEnabled
-    : operation === "insert"
-      ? policy.insertEnabled
-      : operation === "update"
-        ? policy.updateEnabled
-        : policy.deleteEnabled;
-  if (!allowed) {
-    throw new HTTPException(403, { message: `${operation} is disabled by table policy` });
-  }
-  if (policy.ownerColumn && !ctx.columns.some((col) => col.name === policy.ownerColumn)) {
-    throw new HTTPException(409, {
-      message: `policy owner column ${policy.ownerColumn} does not exist on ${ctx.tableName}`,
-    });
-  }
+function ownerFilters(ctx: TableContext, user: AppAuthUser): Filter[] {
+  return ctx.ownerColumn ? [{ column: ctx.ownerColumn, op: "eq", value: user.id }] : [];
 }
 
-function ownerFilters(
-  ctx: { policy: DataApiPolicy | null },
-  user: AppAuthUser,
-): Filter[] {
-  const ownerColumn = ctx.policy?.ownerColumn;
-  return ownerColumn ? [{ column: ownerColumn, op: "eq", value: user.id }] : [];
-}
-
-function assertOwnerInsert(
-  ctx: { policy: DataApiPolicy | null },
-  user: AppAuthUser,
-  payload: unknown[],
-): void {
-  const ownerColumn = ctx.policy?.ownerColumn;
+function assertOwnerInsert(ctx: TableContext, user: AppAuthUser, payload: Record<string, unknown>[]): void {
+  const ownerColumn = ctx.ownerColumn;
   if (!ownerColumn) return;
   for (const row of payload) {
-    if (!isRecord(row) || row[ownerColumn] !== user.id) {
+    if (row[ownerColumn] !== user.id) {
       throw new HTTPException(403, {
         message: `insert policy requires ${ownerColumn} to match the App Auth user id`,
       });
@@ -333,12 +376,8 @@ function assertOwnerInsert(
   }
 }
 
-function assertOwnerUpdate(
-  ctx: { policy: DataApiPolicy | null },
-  user: AppAuthUser,
-  body: Record<string, unknown>,
-): void {
-  const ownerColumn = ctx.policy?.ownerColumn;
+function assertOwnerUpdate(ctx: TableContext, user: AppAuthUser, body: Record<string, unknown>): void {
+  const ownerColumn = ctx.ownerColumn;
   if (!ownerColumn) return;
   if (body[ownerColumn] !== undefined && body[ownerColumn] !== user.id) {
     throw new HTTPException(403, {
@@ -347,39 +386,39 @@ function assertOwnerUpdate(
   }
 }
 
+function columnValue(value: unknown): unknown {
+  if (value !== null && typeof value === "object") return JSON.stringify(value);
+  return value;
+}
+
+const COMPARISON: Record<Exclude<FilterOp, "like" | "ilike" | "in">, string> = {
+  eq: "=",
+  neq: "<>",
+  gt: ">",
+  gte: ">=",
+  lt: "<",
+  lte: "<=",
+};
+
 function buildWhere(filters: Filter[], values: unknown[]): string {
   if (filters.length === 0) return "";
   const clauses = filters.map((filter) => {
+    const ref = quoteIdent(filter.column);
     switch (filter.op) {
-      case "eq":
-        values.push(filter.value);
-        return `${quoteIdent(filter.column)} = ?`;
-      case "neq":
-        values.push(filter.value);
-        return `${quoteIdent(filter.column)} <> ?`;
-      case "gt":
-        values.push(filter.value);
-        return `${quoteIdent(filter.column)} > ?`;
-      case "gte":
-        values.push(filter.value);
-        return `${quoteIdent(filter.column)} >= ?`;
-      case "lt":
-        values.push(filter.value);
-        return `${quoteIdent(filter.column)} < ?`;
-      case "lte":
-        values.push(filter.value);
-        return `${quoteIdent(filter.column)} <= ?`;
       case "like":
         values.push(filter.value);
-        return `${quoteIdent(filter.column)} LIKE ?`;
+        return `${ref} LIKE ?`;
       case "ilike":
         values.push(filter.value.toLowerCase());
-        return `LOWER(${quoteIdent(filter.column)}) LIKE ?`;
+        return `LOWER(${ref}) LIKE ?`;
       case "in": {
         const list = parseInList(filter.value);
         values.push(...list);
-        return `${quoteIdent(filter.column)} IN (${list.map(() => "?").join(", ")})`;
+        return `${ref} IN (${list.map(() => "?").join(", ")})`;
       }
+      default:
+        values.push(filter.value);
+        return `${ref} ${COMPARISON[filter.op]} ?`;
     }
   });
   return `WHERE ${clauses.join(" AND ")}`;
@@ -412,13 +451,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
-function safeIdent(value: string): boolean {
-  return /^[a-z0-9_]+$/i.test(value);
-}
-
 function quoteIdent(value: string): string {
-  if (!safeIdent(value)) throw new HTTPException(400, { message: `unsafe identifier: ${value}` });
-  return `\`${value}\``;
+  if (!isSafeIdent(value)) throw new HTTPException(400, { message: `unsafe identifier: ${value}` });
+  return quoteSafeIdent(value);
 }
 
 function tableRef(ctx: { database: { name: string }; tableName: string }): string {

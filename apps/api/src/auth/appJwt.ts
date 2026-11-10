@@ -1,91 +1,102 @@
-import type { AppAuthSettings, AppAuthUser } from "@kilndb/shared";
+import type { AppAuthSettings, AppAuthUser } from "@lambdata/shared";
+import { db } from "../db/client";
 import { settings } from "../db/queries";
-import { generatePassword } from "../util/credentials";
+import { LEGACY } from "../util/legacy";
+import { signHs256, verifyHs256 } from "./hs256";
+import { appTokenVersion, tokenVersionMatches } from "./tokenVersions";
 
-const ISSUER = "kilndb-app-auth";
+export const APP_AUTH_ISSUER = "lambdata-app-auth";
+const ACCEPTED_ISSUERS = new Set<string>([APP_AUTH_ISSUER, LEGACY.appAuthIssuer]);
 const DEFAULT_TOKEN_TTL_SECONDS = 60 * 60;
+const MIN_TOKEN_TTL_SECONDS = 300;
+const MAX_TOKEN_TTL_SECONDS = 60 * 60 * 24 * 30;
+const SECRET_SETTING = "app_auth_jwt_secret";
+export const SIGNUP_SETTING = "app_auth_allow_signup";
+export const ISSUER_SETTING = "app_auth_issuer";
+export const SIGNUP_UPGRADE_CHECKED = "app_auth_signup_upgrade_checked";
+export const SIGNUP_DISABLED_BY_UPGRADE = "app_auth_signup_disabled_by_upgrade";
+export const SIGNUP_REFUSED_COUNT = "app_auth_signup_refused_count";
+export const SIGNUP_REFUSED_LAST_AT = "app_auth_signup_refused_last_at";
 
-interface Header {
-  alg: "HS256";
-  typ: "JWT";
-}
+export const SIGNUP_DISABLED_MESSAGE =
+  "Sign-up is disabled on this LambData server. An admin can turn it on in the LambData console under App Auth, Allow signup.";
 
-interface Claims {
+export interface AppAuthClaims {
   sub: string;
   email: string;
   role: "authenticated";
   aud: "authenticated";
-  iss: typeof ISSUER;
+  iss: string;
+  ver: number;
   iat: number;
   exp: number;
 }
 
-let secretKey: CryptoKey | null = null;
+function clampTtl(value: number): number {
+  return Math.max(MIN_TOKEN_TTL_SECONDS, Math.min(MAX_TOKEN_TTL_SECONDS, Math.floor(value)));
+}
+
+function appAuthWasUsed(): boolean {
+  if (settings.get(SECRET_SETTING)) return true;
+  const row = db.query("SELECT COUNT(*) AS n FROM app_auth_users").get() as { n: number } | null;
+  return Number(row?.n ?? 0) > 0;
+}
+
+export function appAuthIssuer(): string {
+  const stored = settings.get(ISSUER_SETTING);
+  if (stored && ACCEPTED_ISSUERS.has(stored)) return stored;
+  const issuer = settings.get(SECRET_SETTING) ? LEGACY.appAuthIssuer : APP_AUTH_ISSUER;
+  settings.set(ISSUER_SETTING, issuer);
+  return issuer;
+}
+
+export function settleAppAuthUpgrade(): void {
+  appAuthIssuer();
+  if (settings.get(SIGNUP_UPGRADE_CHECKED) === "1") return;
+  if (settings.get(SIGNUP_SETTING) === null && appAuthWasUsed()) {
+    settings.set(SIGNUP_DISABLED_BY_UPGRADE, "1");
+    console.log(
+      "[app-auth] App Auth sign-up is now off until an admin turns it on (it used to be on by default). Apps that let users sign up will get 403 until then.",
+    );
+  }
+  settings.set(SIGNUP_UPGRADE_CHECKED, "1");
+}
+
+export function signupDisabledByUpgrade(): boolean {
+  return settings.get(SIGNUP_DISABLED_BY_UPGRADE) === "1" && settings.get(SIGNUP_SETTING) === null;
+}
+
+export function recordRefusedSignup(): void {
+  if (!signupDisabledByUpgrade()) return;
+  const count = Number(settings.get(SIGNUP_REFUSED_COUNT) ?? 0);
+  settings.set(SIGNUP_REFUSED_COUNT, String(Number.isFinite(count) ? count + 1 : 1));
+  settings.set(SIGNUP_REFUSED_LAST_AT, String(Date.now()));
+}
 
 export function appAuthSettings(): AppAuthSettings {
-  const allowSignup = settings.get("app_auth_allow_signup") !== "0";
   const ttlRaw = Number(settings.get("app_auth_token_ttl_seconds") ?? DEFAULT_TOKEN_TTL_SECONDS);
-  const tokenTtlSeconds = Number.isFinite(ttlRaw)
-    ? Math.max(300, Math.min(60 * 60 * 24 * 30, Math.floor(ttlRaw)))
-    : DEFAULT_TOKEN_TTL_SECONDS;
+  const flagged = signupDisabledByUpgrade();
+  const refused = Number(settings.get(SIGNUP_REFUSED_COUNT) ?? 0);
+  const lastAt = Number(settings.get(SIGNUP_REFUSED_LAST_AT) ?? 0);
   return {
-    allowSignup,
-    tokenTtlSeconds,
-    issuer: ISSUER,
+    allowSignup: settings.getBool(SIGNUP_SETTING, false),
+    tokenTtlSeconds: Number.isFinite(ttlRaw) ? clampTtl(ttlRaw) : DEFAULT_TOKEN_TTL_SECONDS,
+    issuer: appAuthIssuer(),
+    signupDisabledByUpgrade: flagged,
+    signupRefusedCount: flagged && Number.isFinite(refused) ? refused : 0,
+    signupRefusedLastAt: flagged && Number.isFinite(lastAt) && lastAt > 0 ? lastAt : null,
   };
 }
 
-export function updateAppAuthSettings(patch: Partial<AppAuthSettings>): AppAuthSettings {
+export function updateAppAuthSettings(patch: { allowSignup?: boolean; tokenTtlSeconds?: number }): AppAuthSettings {
   if (patch.allowSignup !== undefined) {
-    settings.set("app_auth_allow_signup", patch.allowSignup ? "1" : "0");
+    settings.set(SIGNUP_SETTING, patch.allowSignup ? "1" : "0");
+    settings.set(SIGNUP_DISABLED_BY_UPGRADE, "0");
   }
   if (patch.tokenTtlSeconds !== undefined) {
-    const ttl = Math.max(300, Math.min(60 * 60 * 24 * 30, Math.floor(patch.tokenTtlSeconds)));
-    settings.set("app_auth_token_ttl_seconds", String(ttl));
+    settings.set("app_auth_token_ttl_seconds", String(clampTtl(patch.tokenTtlSeconds)));
   }
   return appAuthSettings();
-}
-
-async function getSecretKey(): Promise<CryptoKey> {
-  if (secretKey) return secretKey;
-  let secret = settings.get("app_auth_jwt_secret");
-  if (!secret) {
-    secret = generatePassword() + generatePassword();
-    settings.set("app_auth_jwt_secret", secret);
-  }
-  secretKey = await crypto.subtle.importKey(
-    "raw",
-    copyToFresh(new TextEncoder().encode(secret)),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign", "verify"],
-  );
-  return secretKey;
-}
-
-function freshBytes(n: number): Uint8Array<ArrayBuffer> {
-  return new Uint8Array(new ArrayBuffer(n));
-}
-
-function copyToFresh(src: Uint8Array): Uint8Array<ArrayBuffer> {
-  const out = freshBytes(src.byteLength);
-  out.set(src);
-  return out;
-}
-
-function base64UrlEncode(bytes: Uint8Array): string {
-  let bin = "";
-  for (const b of bytes) bin += String.fromCharCode(b);
-  return btoa(bin).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
-}
-
-function base64UrlDecode(s: string): Uint8Array<ArrayBuffer> {
-  const pad = (4 - (s.length % 4)) % 4;
-  const b64 = (s + "=".repeat(pad)).replaceAll("-", "+").replaceAll("_", "/");
-  const bin = atob(b64);
-  const out = freshBytes(bin.length);
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-  return out;
 }
 
 export async function signAppAuthJwt(user: AppAuthUser): Promise<{
@@ -93,50 +104,38 @@ export async function signAppAuthJwt(user: AppAuthUser): Promise<{
   expiresIn: number;
 }> {
   const cfg = appAuthSettings();
-  const header: Header = { alg: "HS256", typ: "JWT" };
   const now = Math.floor(Date.now() / 1000);
-  const claims: Claims = {
+  const claims: AppAuthClaims = {
     sub: user.id,
     email: user.email,
     role: "authenticated",
     aud: "authenticated",
-    iss: ISSUER,
+    iss: cfg.issuer,
+    ver: appTokenVersion(user.id) ?? 0,
     iat: now,
     exp: now + cfg.tokenTtlSeconds,
   };
-  const enc = new TextEncoder();
-  const headerB = base64UrlEncode(enc.encode(JSON.stringify(header)));
-  const claimsB = base64UrlEncode(enc.encode(JSON.stringify(claims)));
-  const signingInput = `${headerB}.${claimsB}`;
-  const key = await getSecretKey();
-  const sig = new Uint8Array(
-    await crypto.subtle.sign("HMAC", key, copyToFresh(enc.encode(signingInput))),
-  );
   return {
-    accessToken: `${signingInput}.${base64UrlEncode(sig)}`,
+    accessToken: await signHs256(SECRET_SETTING, { ...claims }),
     expiresIn: cfg.tokenTtlSeconds,
   };
 }
 
-export async function verifyAppAuthJwt(token: string): Promise<Claims | null> {
-  const parts = token.split(".");
-  if (parts.length !== 3) return null;
-  const [headerB, claimsB, sigB] = parts as [string, string, string];
-  const key = await getSecretKey();
-  const enc = new TextEncoder();
-  const ok = await crypto.subtle.verify(
-    "HMAC",
-    key,
-    base64UrlDecode(sigB),
-    copyToFresh(enc.encode(`${headerB}.${claimsB}`)),
-  );
-  if (!ok) return null;
-  try {
-    const claims = JSON.parse(new TextDecoder().decode(base64UrlDecode(claimsB))) as Claims;
-    if (claims.exp * 1000 < Date.now()) return null;
-    if (claims.iss !== ISSUER || claims.aud !== "authenticated") return null;
-    return claims;
-  } catch {
-    return null;
-  }
+export async function verifyAppAuthJwt(token: string): Promise<AppAuthClaims | null> {
+  appAuthIssuer();
+  const claims = await verifyHs256(SECRET_SETTING, token);
+  if (!claims || typeof claims.sub !== "string") return null;
+  if (typeof claims.iss !== "string" || !ACCEPTED_ISSUERS.has(claims.iss)) return null;
+  if (claims.aud !== "authenticated") return null;
+  if (!tokenVersionMatches(claims.ver, appTokenVersion(claims.sub))) return null;
+  return {
+    sub: claims.sub,
+    email: typeof claims.email === "string" ? claims.email : "",
+    role: "authenticated",
+    aud: "authenticated",
+    iss: claims.iss,
+    ver: typeof claims.ver === "number" ? claims.ver : 0,
+    iat: typeof claims.iat === "number" ? claims.iat : 0,
+    exp: claims.exp,
+  };
 }

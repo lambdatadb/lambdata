@@ -1,52 +1,90 @@
+import { Slot } from "@radix-ui/react-slot";
+import { cva, type VariantProps } from "class-variance-authority";
 import { forwardRef, type ButtonHTMLAttributes } from "react";
+import { Spinner } from "./Spinner";
 import { cn } from "./cn";
+import { focusRing } from "./styles";
 
-type Variant = "primary" | "secondary" | "ghost" | "danger";
-type Size = "xs" | "sm" | "md";
+export const buttonVariants = cva(
+  [
+    "relative inline-flex shrink-0 select-none items-center justify-center gap-2 whitespace-nowrap rounded-md font-medium",
+    "transition-[color,background-color,border-color,opacity] duration-150",
+    "disabled:pointer-events-none disabled:opacity-45 aria-disabled:pointer-events-none aria-disabled:opacity-45 data-[loading]:pointer-events-none",
+    "[&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
+    focusRing,
+  ],
+  {
+    variants: {
+      variant: {
+        primary:
+          "bg-accent text-accent-fg hover:bg-accent-hover active:bg-accent disabled:bg-bg-hover disabled:text-text-subtle disabled:opacity-100",
+        default:
+          "bg-accent text-accent-fg hover:bg-accent-hover active:bg-accent disabled:bg-bg-hover disabled:text-text-subtle disabled:opacity-100",
+        secondary: "border border-border-strong bg-bg-raised text-text hover:border-border-input hover:bg-bg-hover",
+        outline: "border border-border-input bg-transparent text-text hover:border-border-control/70 hover:bg-bg-hover",
+        ghost: "text-text-muted hover:bg-bg-hover hover:text-text data-[state=open]:bg-bg-hover data-[state=open]:text-text",
+        danger: "bg-danger text-danger-fg hover:bg-danger-hover",
+        destructive: "bg-danger text-danger-fg hover:bg-danger-hover",
+        "danger-soft": "border border-danger/35 bg-danger/10 text-danger hover:border-danger/55 hover:bg-danger/15",
+        link: "h-auto rounded-sm px-0 text-text underline decoration-border-control underline-offset-4 hover:decoration-accent",
+      },
+      size: {
+        xs: "h-7 gap-1.5 px-2.5 text-label [&_svg:not([class*='size-'])]:size-3.5",
+        sm: "h-8 gap-1.5 px-3 text-body",
+        md: "h-9 px-3.5 text-body",
+        lg: "h-10 px-4 text-body",
+        icon: "size-9",
+        "icon-sm": "size-8",
+        "icon-xs": "size-7 [&_svg:not([class*='size-'])]:size-3.5",
+      },
+    },
+    compoundVariants: [{ variant: "link", class: "h-auto px-0" }],
+    defaultVariants: { variant: "primary", size: "md" },
+  },
+);
 
-interface Props extends ButtonHTMLAttributes<HTMLButtonElement> {
-  variant?: Variant;
-  size?: Size;
+export type ButtonVariant = NonNullable<VariantProps<typeof buttonVariants>["variant"]>;
+export type ButtonSize = NonNullable<VariantProps<typeof buttonVariants>["size"]>;
+
+export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
+  variant?: ButtonVariant;
+  size?: ButtonSize;
   loading?: boolean;
+  asChild?: boolean;
 }
 
-const variants: Record<Variant, string> = {
-  primary:
-    "bg-accent text-accent-fg hover:bg-accent-hover disabled:bg-accent/50 focus-visible:ring-accent",
-  secondary:
-    "bg-bg-subtle text-text border border-border hover:bg-bg-panel focus-visible:ring-border-strong",
-  ghost: "text-text-muted hover:text-text hover:bg-bg-subtle focus-visible:ring-border",
-  danger: "bg-danger text-white hover:bg-danger-hover focus-visible:ring-danger",
-};
-
-const sizes: Record<Size, string> = {
-  xs: "h-7 px-2.5 text-label rounded-md",
-  sm: "h-8 px-3 text-sm rounded-md",
-  md: "h-9 px-3.5 text-sm rounded-md",
-};
-
-export const Button = forwardRef<HTMLButtonElement, Props>(function Button(
-  { variant = "primary", size = "md", loading, className, children, disabled, ...rest },
+export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button(
+  { variant, size, loading = false, asChild = false, className, children, disabled, type, onClick, ...rest },
   ref,
 ) {
+  const classes = cn(buttonVariants({ variant, size }), className);
+  if (asChild) {
+    return (
+      <Slot ref={ref} className={classes} aria-busy={loading || undefined} onClick={onClick} {...rest}>
+        {children}
+      </Slot>
+    );
+  }
   return (
     <button
       ref={ref}
-      disabled={disabled || loading}
-      className={cn(
-        "inline-flex items-center justify-center gap-2 font-medium transition-colors",
-        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-0",
-        "disabled:cursor-not-allowed disabled:opacity-60",
-        variants[variant],
-        sizes[size],
-        className,
-      )}
+      type={type ?? "button"}
+      disabled={disabled}
+      aria-busy={loading || undefined}
+      data-loading={loading ? "" : undefined}
+      onClick={(event) => {
+        if (loading) {
+          event.preventDefault();
+          return;
+        }
+        onClick?.(event);
+      }}
+      className={classes}
       {...rest}
     >
-      {loading && (
-        <span className="inline-block size-3 rounded-full border-2 border-current/30 border-t-current animate-spin" />
-      )}
-      {children}
+      {loading && <Spinner decorative size={size === "xs" || size === "icon-xs" ? "xs" : "sm"} className="text-current" />}
+      {loading && size?.startsWith("icon") ? null : children}
+      {loading && <span className="sr-only">Working</span>}
     </button>
   );
 });

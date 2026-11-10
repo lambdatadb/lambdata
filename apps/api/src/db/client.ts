@@ -1,7 +1,8 @@
 import { Database } from "bun:sqlite";
 import { env, ensureDataDirs } from "../env";
 
-let current: Database;
+let current: Database | null = null;
+let closed = false;
 
 function open(): Database {
   ensureDataDirs();
@@ -12,25 +13,36 @@ function open(): Database {
   return d;
 }
 
-current = open();
+function active(): Database {
+  if (closed) throw new Error("metadata store is closed");
+  if (!current) current = open();
+  return current;
+}
 
-// Proxy so all imports of `db` route to the currently-open Database, even
-// after it's swapped during a data-dir migration.
 export const db = new Proxy({} as Database, {
   get(_target, prop) {
-    const value = (current as unknown as Record<string | symbol, unknown>)[prop as string];
-    return typeof value === "function" ? (value as (...a: unknown[]) => unknown).bind(current) : value;
+    const target = active();
+    const value = (target as unknown as Record<string | symbol, unknown>)[prop as string];
+    return typeof value === "function" ? (value as (...a: unknown[]) => unknown).bind(target) : value;
   },
 });
 
 export function closeDb(): void {
-  try {
-    current.close();
-  } catch {
-    // Already closed.
+  if (current) {
+    try {
+      current.close();
+    } catch {}
   }
+  current = null;
+  closed = true;
 }
 
 export function reopenDb(): void {
+  if (current) {
+    try {
+      current.close();
+    } catch {}
+  }
+  closed = false;
   current = open();
 }

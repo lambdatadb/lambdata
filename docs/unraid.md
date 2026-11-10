@@ -1,6 +1,6 @@
 # Unraid deployment
 
-KilnDB provides an Unraid Docker template backed by `ghcr.io/maybegrim/kilndb:latest`. The template keeps all application and Tailscale state in the same appdata directory.
+LambData ships an Unraid Docker template that uses the published image `ghcr.io/lambdatadb/lambdata:latest`. The container keeps everything, including its Tailscale state, in one appdata folder.
 
 ## Install the template
 
@@ -9,58 +9,104 @@ Run this from the Unraid terminal:
 ```bash
 mkdir -p /boot/config/plugins/dockerMan/templates-user
 curl -fsSL \
-  https://raw.githubusercontent.com/maybegrim/KilnDB/main/unraid/kilndb.xml \
-  -o /boot/config/plugins/dockerMan/templates-user/my-KilnDB.xml
+  https://raw.githubusercontent.com/lambdatadb/lambdata/main/unraid/lambdata.xml \
+  -o /boot/config/plugins/dockerMan/templates-user/my-LambData.xml
 ```
 
-Open **Docker → Add Container**, select **KilnDB**, and review these defaults:
+Open the **Docker** tab, click **Add Container**, choose **LambData** from the template list, and check these settings:
 
 | Setting | Default |
 |---|---|
-| Repository | `ghcr.io/maybegrim/kilndb:latest` |
+| Repository | `ghcr.io/lambdatadb/lambdata:latest` |
 | Network | `Bridge` |
-| Web UI | Host `4317` → container `4317` |
-| Data | `/mnt/user/appdata/kilndb` → `/data` |
-| Secure cookies | `0` |
+| Web UI | Host `4317` to container `4317` |
+| LambData Data | `/mnt/user/appdata/lambdata` to `/data` |
+| Extra Parameters (advanced view) | `--stop-timeout=45` |
+| Secure Cookies (advanced view) | `0` |
+| Access Policy Recovery (advanced view) | empty |
 | Privileged | Off |
 
-Apply the template, open `http://<unraid-ip>:4317`, and complete KilnDB's first-run setup.
+`--stop-timeout=45` gives LambData up to 45 seconds to shut MariaDB down cleanly when the container stops; Docker's default is 10 seconds. Keep it at 30 seconds or more.
+
+Click **Apply**.
+
+## First start: the setup token
+
+The setup wizard asks for a one-time setup token before it creates the first admin account. LambData prints it in the container log:
+
+1. On the **Docker** tab, click the LambData icon and choose **Logs**.
+2. Find the line `LambData first-run setup token:` and copy the code after it (five groups of four characters).
+3. Open the console (click the icon again and choose **WebUI**, or go to `http://<unraid-ip>:4317`) and paste the token on the first screen.
+
+![The first setup screen asking for the token](screenshots/setup-token.png)
+
+Restarting the container before setup is finished prints a new token; use the most recent one. Once setup is done there is no token any more. The storage step shows `/data` already chosen: on Unraid that is the appdata folder you mapped.
+
+## Upgrading from KilnDB
+
+A container created from the KilnDB template keeps running the last KilnDB version: that image is frozen and no longer updated. Switch it to LambData yourself, after a backup.
+
+1. Back up the appdata folder (the container is usually called `KilnDB`):
+
+   ```bash
+   docker stop KilnDB
+   mkdir -p /mnt/user/backups
+   tar -C /mnt/user/appdata -czf /mnt/user/backups/kilndb-before-lambdata.tar.gz kilndb
+   ```
+
+2. On the **Docker** tab, click the KilnDB icon and choose **Edit**.
+3. Change **Repository** to `ghcr.io/lambdatadb/lambdata:latest`.
+4. Keep `/mnt/user/appdata/kilndb` mapped to `/data`. That folder stays valid and nothing needs to be moved or renamed. The `KILNDB_COOKIE_SECURE` variable can stay too; LambData still reads every `KILNDB_*` variable.
+5. Switch to the advanced view and add `--stop-timeout=45` under **Extra Parameters**.
+6. Click **Apply**, then open the log to watch the first start.
+
+If you prefer the new template, remove the KilnDB container first (this does not touch its appdata folder), add LambData from the template as above, and set **LambData Data** to `/mnt/user/appdata/kilndb`. The same appdata path keeps your data. Never run two containers on the same appdata folder.
+
+Then read [Upgrading from KilnDB](upgrading.md) for what changes after the first start: the Data API starts closed, App Auth sign-up is off, old snapshots become checkpoints, and open browser tabs need a reload.
 
 ## Native Tailscale integration
 
-Unraid 7.2 or newer can inject and manage Tailscale inside the KilnDB container. KilnDB remains unprivileged and uses its normal entrypoint after Unraid's Tailscale hook finishes.
+Unraid 7.2 or newer can put the LambData container on your tailnet. LambData stays unprivileged and starts normally after Unraid's Tailscale hook has run.
 
-1. Edit the KilnDB container and enable **Use Tailscale**.
+1. Edit the LambData container and enable **Use Tailscale**.
 2. Choose a unique Tailscale hostname.
-3. Leave **Be a Tailscale Exit Node** disabled.
-4. Leave userspace networking enabled unless you specifically need full tailnet DNS or outbound connectivity.
-5. Optionally select **Serve** and use port `4317` to expose the console through tailnet-only HTTPS.
-6. If Serve uses HTTPS, set the KilnDB **Secure Cookies** variable to `1`.
-7. Apply the template and open the container log.
-8. Follow the Tailscale authentication link shown during first startup.
+3. Leave **Be a Tailscale Exit Node** off.
+4. Leave userspace networking on unless you specifically need full tailnet DNS or outbound connectivity.
+5. Optionally select **Serve** with port `4317` to reach the console over HTTPS on your tailnet. Session cookies become Secure on their own over HTTPS; the **Secure Cookies** variable can stay at `0`.
+6. Click **Apply** and open the container log.
+7. Follow the Tailscale sign-in link shown during the first start.
 
-The template fixes the Tailscale state directory at `/data/.tailscale_state`, so the container keeps its identity across updates and recreation. When native integration is active, use the Unraid template to manage Tailscale; KilnDB reports its status without offering conflicting up/down controls.
+The template keeps the Tailscale state in `/data/.tailscale_state`, so the container keeps its tailnet identity across updates. While Unraid manages Tailscale, the Network page in LambData shows its status but leaves the controls to the template.
 
-Serve and Funnel are different exposure modes. Serve is restricted to your tailnet. Funnel exposes the service publicly and should remain disabled unless that is explicitly intended.
+Serve and Funnel are different. Serve is only reachable from your tailnet. Funnel publishes the console on the internet; leave it off. See [Network access](network.md) for limiting the console to the tailnet.
 
 ## Updates
 
-Use **Docker → Check for Updates** in Unraid. The template tracks the `latest` GHCR image published from KilnDB's `main` branch.
+Use **Check for Updates** on the **Docker** tab. The template follows the `latest` image published from LambData's `main` branch.
 
-To force a refresh from the terminal:
+To pull from the terminal instead:
 
 ```bash
-docker pull ghcr.io/maybegrim/kilndb:latest
+docker pull ghcr.io/lambdatadb/lambdata:latest
 ```
 
-Then edit the container and apply the template again. The `/mnt/user/appdata/kilndb` bind mount is preserved.
+Then edit the container and click **Apply**. The appdata folder is kept.
 
 ## Backups
 
-Stop KilnDB before taking a filesystem-level backup and copy the complete appdata directory. It includes MariaDB, metadata, snapshots, uploaded objects, functions, the encryption key, and the Tailscale device state.
+Stop LambData before copying its appdata folder, so MariaDB's files are consistent. The folder holds MariaDB, the metadata database, checkpoints, uploaded objects, functions, the encryption key `master.key` and the Tailscale state. A backup without `master.key` cannot decrypt stored passwords and secrets.
 
 ```bash
-docker stop KilnDB
-tar -C /mnt/user/appdata -czf /mnt/user/backups/kilndb-appdata.tar.gz kilndb
-docker start KilnDB
+docker stop LambData
+mkdir -p /mnt/user/backups
+tar -C /mnt/user/appdata -czf /mnt/user/backups/lambdata-appdata.tar.gz lambdata
+docker start LambData
 ```
+
+For a container upgraded from KilnDB, use its own name (for example `KilnDB`) and folder (`kilndb`).
+
+Checkpoints are not a replacement for this backup: they live in the same folder.
+
+## File ownership
+
+LambData runs as user and group 999 inside the container, the same as KilnDB did. At start, if the data folder belongs to someone else, the container changes the owner of every file and folder in it that does not already belong to 999:999, and logs how many it changed. To forbid that, set `LAMBDATA_FIX_DATA_OWNERSHIP=never`: the container then stops with a message and the `chown` command to run yourself.

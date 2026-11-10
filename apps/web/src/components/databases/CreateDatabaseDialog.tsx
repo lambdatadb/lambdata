@@ -1,21 +1,163 @@
-import { useMemo, useState } from "react";
-import { motion, AnimatePresence } from "framer-motion";
+import { useEffect, useMemo, useRef, useState, type ComponentType, type ReactNode } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import type { DatabaseCredentials, DatabaseKind } from "@kilndb/shared";
-import { api, ApiError } from "../../lib/api";
-import { useConnectionInfo } from "../../lib/useConnectionInfo";
-import { useToast } from "../ui/Toast";
+import { ArrowLeftRight, ArrowRight, Database as DatabaseIcon, FileUp } from "lucide-react";
+import type { Database, DatabaseCredentials, DatabaseKind } from "@lambdata/shared";
+import { api, errorMessage } from "../../lib/api";
+import { formatConnectionAddress, useDatabaseHost } from "../../lib/useConnectionInfo";
+import { queryKeys } from "../../lib/queries";
+import { useTermNode } from "../../lib/terminology";
+import { Alert } from "../ui/Alert";
 import { Button } from "../ui/Button";
-import { Dialog } from "../ui/Dialog";
-import { CredentialsReveal } from "./CredentialsReveal";
+import {
+  DialogBody,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogRoot,
+  DialogTitle,
+} from "../ui/Dialog";
+import { Field } from "../ui/Field";
+import { Input } from "../ui/Input";
+import { RadioCard, RadioGroup } from "../ui/RadioGroup";
+import { Switch } from "../ui/Switch";
 import { cn } from "../ui/cn";
+import { ImportCreateBody } from "../import/ImportCreateBody";
+import { useCredentialsReveal } from "./CredentialsReveal";
+
+export interface CreateDatabaseTypeBodyProps {
+  type: string;
+  picker: ReactNode;
+  onCancel: () => void;
+  onFinished: () => void;
+  onBusyChange: (busy: boolean) => void;
+}
+
+export interface DatabaseTypeOption {
+  value: string;
+  title: string;
+  description: string;
+  icon: ReactNode;
+  badge?: ReactNode;
+  disabled?: boolean;
+  Body: ComponentType<CreateDatabaseTypeBodyProps>;
+}
+
+export const DATABASE_TYPES: DatabaseTypeOption[] = [
+  {
+    value: "standard",
+    title: "Standard",
+    description: "A fresh, empty schema",
+    icon: <DatabaseIcon />,
+    Body: ProvisionBody,
+  },
+  {
+    value: "mirror",
+    title: "Mirror",
+    description: "Syncs from an external source",
+    icon: <ArrowLeftRight />,
+    Body: ProvisionBody,
+  },
+  {
+    value: "import",
+    title: "Import",
+    description: "From a SQLite or SQL dump file",
+    icon: <FileUp />,
+    Body: ImportCreateBody,
+  },
+];
+
+const PICKER_COLUMNS: Record<number, string> = {
+  1: "sm:grid-cols-1",
+  2: "sm:grid-cols-2",
+  3: "sm:grid-cols-3",
+  4: "sm:grid-cols-2 lg:grid-cols-4",
+};
+
+function resolveType(value: string | null | undefined): string {
+  const match = DATABASE_TYPES.find((t) => t.value === value && !t.disabled);
+  return match?.value ?? DATABASE_TYPES[0]!.value;
+}
 
 interface Props {
   open: boolean;
   onClose: () => void;
+  initialType?: string | null;
 }
 
-function deriveSchema(displayName: string): string {
+export function CreateDatabaseDialog({ open, onClose, initialType }: Props) {
+  const [type, setType] = useState(() => resolveType(initialType));
+  const [busy, setBusy] = useState(false);
+  const contentRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    setType(resolveType(initialType));
+    setBusy(false);
+  }, [open, initialType]);
+
+  const option = DATABASE_TYPES.find((t) => t.value === type) ?? DATABASE_TYPES[0]!;
+  const Body = option.Body;
+
+  const picker = (
+    <RadioGroup
+      value={type}
+      onValueChange={setType}
+      disabled={busy}
+      aria-label="Database type"
+      className={cn("grid-cols-1", PICKER_COLUMNS[DATABASE_TYPES.length] ?? "sm:grid-cols-3")}
+    >
+      {DATABASE_TYPES.map((t) => (
+        <RadioCard
+          key={t.value}
+          value={t.value}
+          icon={t.icon}
+          title={t.title}
+          description={t.description}
+          badge={t.badge}
+          disabled={t.disabled}
+          layout="inline"
+        />
+      ))}
+    </RadioGroup>
+  );
+
+  return (
+    <DialogRoot
+      open={open}
+      onOpenChange={(next) => {
+        if (!next && !busy) onClose();
+      }}
+    >
+      <DialogContent
+        ref={contentRef}
+        size="4xl"
+        dismissible={!busy}
+        className="has-[[data-dialog-fill]]:h-[calc(100dvh-2rem)]"
+        onOpenAutoFocus={(event) => {
+          const target = contentRef.current?.querySelector<HTMLElement>("[data-autofocus]");
+          if (!target) return;
+          event.preventDefault();
+          target.focus();
+        }}
+      >
+        <DialogHeader>
+          <DialogTitle>Create a database</DialogTitle>
+          <DialogDescription>A schema, a dedicated MariaDB user and ready-made connection strings.</DialogDescription>
+        </DialogHeader>
+        <Body
+          type={type}
+          picker={picker}
+          onCancel={onClose}
+          onFinished={onClose}
+          onBusyChange={setBusy}
+        />
+      </DialogContent>
+    </DialogRoot>
+  );
+}
+
+export function deriveSchema(displayName: string): string {
   const slug = displayName
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "_")
@@ -24,419 +166,260 @@ function deriveSchema(displayName: string): string {
   return slug || "db";
 }
 
-export function CreateDatabaseDialog({ open, onClose }: Props) {
+const HOST_PATTERN = /^[A-Za-z0-9.%_:\-/]+$/;
+
+export function hostError(value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) return "Enter a host pattern. Use % to allow any host.";
+  if (!HOST_PATTERN.test(trimmed)) return "Use letters, digits, dots, colons, % and _ only, for example 192.168.1.%";
+  return null;
+}
+
+function ProvisionBody({ type, picker, onCancel, onFinished, onBusyChange }: CreateDatabaseTypeBodyProps) {
   const qc = useQueryClient();
-  const toast = useToast();
-  const conn = useConnectionInfo();
+  const reveal = useCredentialsReveal();
   const [displayName, setDisplayName] = useState("");
-  const [kind, setKind] = useState<DatabaseKind>("standard");
   const [connectionsFrom, setConnectionsFrom] = useState("%");
   const [tailnetOnly, setTailnetOnly] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-  const [credentials, setCredentials] = useState<DatabaseCredentials | null>(null);
+  const conn = useDatabaseHost(tailnetOnly);
+  const [versioned, setVersioned] = useState(false);
+  const [showInVitals, setShowInVitals] = useState(true);
+  const [touched, setTouched] = useState(false);
+  const kind: DatabaseKind = type === "mirror" ? "mirror" : "standard";
 
-  const schema = useMemo(() => (displayName ? deriveSchema(displayName) : ""), [displayName]);
-  const effectiveHost = tailnetOnly ? "100.%" : connectionsFrom || "%";
+  const schema = useMemo(() => (displayName.trim() ? deriveSchema(displayName) : ""), [displayName]);
+  const hostProblem = tailnetOnly ? null : hostError(connectionsFrom);
+  const nameProblem = displayName.trim() ? null : "Give the database a name.";
+  const effectiveHost = tailnetOnly ? "100.%" : connectionsFrom.trim() || "%";
 
   const mutation = useMutation({
     mutationFn: () =>
-      api.post<{ credentials: DatabaseCredentials }>("/databases", {
-        displayName,
+      api.post<{ database: Database; credentials: DatabaseCredentials }>("/databases", {
+        displayName: displayName.trim(),
         kind,
-        connectionsFrom,
+        connectionsFrom: tailnetOnly ? undefined : connectionsFrom.trim(),
         tailnetOnly,
+        versioned,
+        showInVitals,
       }),
+    onMutate: () => onBusyChange(true),
+    onSettled: () => onBusyChange(false),
     onSuccess: (data) => {
-      qc.invalidateQueries({ queryKey: ["databases"] });
-      setCredentials(data.credentials);
-      toast.show("Database provisioned", "success");
+      void qc.invalidateQueries({ queryKey: queryKeys.databases });
+      void qc.invalidateQueries({ queryKey: queryKeys.dashboardSummary });
+      reveal({
+        credentials: data.credentials,
+        databaseId: data.database.id,
+        tailnetOnly,
+        title: `${data.database.displayName} is ready`,
+        description:
+          kind === "mirror"
+            ? "Save the password; it is shown once. Then open the database and set its source on the Sync tab."
+            : "Save the password; it is shown once.",
+      });
+      onFinished();
     },
-    onError: (e) => setErr(e instanceof ApiError ? e.message : "failed to provision"),
   });
 
-  const reset = () => {
-    setDisplayName("");
-    setKind("standard");
-    setConnectionsFrom("%");
-    setTailnetOnly(false);
-    setErr(null);
-    setCredentials(null);
+  const submit = (event: React.FormEvent) => {
+    event.preventDefault();
+    setTouched(true);
+    if (nameProblem || hostProblem || mutation.isPending) return;
+    mutation.mutate();
   };
-  const closeAll = () => {
-    reset();
-    onClose();
-  };
-
-  if (credentials) {
-    return (
-      <Dialog open={open} onClose={closeAll} size="2xl" title="Database provisioned" hideClose>
-        <CredentialsReveal credentials={credentials} onDone={closeAll} />
-      </Dialog>
-    );
-  }
 
   return (
-    <Dialog open={open} onClose={closeAll} size="3xl" hideClose>
-      <div className="-mt-1 mb-5 flex items-start justify-between gap-3">
-        <h2 className="text-title font-semibold">Create a database</h2>
-        <button
-          onClick={closeAll}
-          aria-label="Close"
-          className="text-text-muted hover:text-text rounded-md p-1.5 transition-colors -mt-1"
-        >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
-            <path
-              d="M6 6l12 12M18 6l-12 12"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-            />
-          </svg>
-        </button>
-      </div>
-
-      <form
-        className="grid grid-cols-5 gap-5"
-        onSubmit={(e) => {
-          e.preventDefault();
-          setErr(null);
-          mutation.mutate();
-        }}
-      >
-        {/* ===== LEFT: form ===== */}
-        <div className="col-span-3 space-y-5">
-          <div>
-            <label className="block">
-              <span className="mb-1.5 block text-label font-medium text-text-muted">
-                Display name <span className="text-accent">*</span>
-              </span>
-              <input
-                autoFocus
+    <form onSubmit={submit} noValidate className="flex min-h-0 flex-1 flex-col">
+      <DialogBody className="space-y-5 pt-3">
+        <div className="space-y-2">
+          <div className="text-label font-medium text-text-muted">Type</div>
+          {picker}
+        </div>
+        <div className="grid grid-cols-1 gap-6 md:grid-cols-5">
+          <div className="space-y-5 md:col-span-3">
+            <Field
+              label="Display name"
+              required
+              error={touched ? nameProblem : null}
+              hint={
+                <>
+                  Schema <span className="font-mono text-text-muted">{schema || "—"}</span>
+                </>
+              }
+            >
+              <Input
                 value={displayName}
                 onChange={(e) => setDisplayName(e.target.value)}
                 placeholder="Customer Portal"
-                className="field-input"
+                data-autofocus
+                autoComplete="off"
+                maxLength={200}
+                disabled={mutation.isPending}
               />
-              <div className="mt-1.5 flex items-center gap-2 text-micro text-text-subtle">
-                <span>schema →</span>
-                <AnimatePresence mode="popLayout" initial={false}>
-                  {schema ? (
-                    <motion.span
-                      key={schema}
-                      initial={{ opacity: 0, y: -2 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      exit={{ opacity: 0, y: 2 }}
-                      transition={{ duration: 0.15 }}
-                      className="font-mono text-accent"
-                    >
-                      {schema}
-                    </motion.span>
-                  ) : (
-                    <span className="font-mono text-text-subtle">—</span>
-                  )}
-                </AnimatePresence>
-              </div>
-            </label>
-          </div>
+            </Field>
 
-          <div>
-            <div className="space-y-1.5">
-              <span className="block text-label font-medium text-text-muted">Type</span>
-              <div className="grid grid-cols-2 gap-2">
-                <TypeCard
-                  active={kind === "standard"}
-                  onClick={() => setKind("standard")}
-                  title="Standard"
-                  desc="A fresh, empty schema"
-                  icon={
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
-                      <ellipse cx="12" cy="5" rx="8" ry="2.5" stroke="currentColor" strokeWidth="1.5" />
-                      <path
-                        d="M4 5v6c0 1.4 3.58 2.5 8 2.5s8-1.1 8-2.5V5M4 11v6c0 1.4 3.58 2.5 8 2.5s8-1.1 8-2.5v-6"
-                        stroke="currentColor"
-                        strokeWidth="1.5"
-                      />
-                    </svg>
-                  }
-                />
-                <TypeCard
-                  active={kind === "mirror"}
-                  onClick={() => setKind("mirror")}
-                  title="Mirror"
-                  desc="Syncs from an external source"
-                  icon={
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
-                      <path
-                        d="M4 7h11M15 7l-3-3M15 7l-3 3M20 17H9M9 17l3 3M9 17l3-3"
-                        stroke="currentColor"
-                        strokeWidth="1.6"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                      />
-                    </svg>
-                  }
-                />
-              </div>
+            <AccessOptions
+              tailnetOnly={tailnetOnly}
+              onTailnetOnlyChange={setTailnetOnly}
+              connectionsFrom={connectionsFrom}
+              onConnectionsFromChange={setConnectionsFrom}
+              error={touched ? hostProblem : null}
+              disabled={mutation.isPending}
+            />
+
+            <div className="space-y-3">
+              <div className="text-label font-medium text-text-muted">Options</div>
+              <Switch
+                checked={versioned}
+                onChange={setVersioned}
+                disabled={mutation.isPending}
+                label="Version this database"
+                description="Track working-copy changes against checkpoints, like a repository. Daily checkpoints run either way."
+              />
+              <Switch
+                checked={showInVitals}
+                onChange={setShowInVitals}
+                disabled={mutation.isPending}
+                label="Show in dashboard vitals"
+                description="Include its size in the cluster chart on the dashboard."
+              />
             </div>
           </div>
 
-          <div>
-            <div className="space-y-3 pt-1">
-              <span className="block text-label font-medium text-text-muted">Access</span>
-              <button
-                type="button"
-                onClick={() => setTailnetOnly(!tailnetOnly)}
-                className={cn(
-                  "w-full text-left rounded-lg border p-3 flex items-start gap-3 transition-all",
-                  tailnetOnly
-                    ? "border-accent/60 bg-accent/[0.06]"
-                    : "border-border bg-bg-subtle hover:border-border-strong",
-                )}
-              >
-                <div className="mt-0.5 shrink-0">
-                  <span
-                    className={cn(
-                      "relative inline-flex h-5 w-9 rounded-full transition-colors",
-                      tailnetOnly ? "bg-accent" : "bg-border-strong",
-                    )}
-                  >
-                    <span
-                      className={cn(
-                        "absolute top-0.5 size-4 rounded-full bg-white transition-transform",
-                        tailnetOnly ? "translate-x-[18px]" : "translate-x-0.5",
-                      )}
-                    />
-                  </span>
-                </div>
-                <div className="flex-1 -mt-0.5">
-                  <div className="text-sm font-medium flex items-center gap-2">
-                    Tailnet only
-                    {tailnetOnly && (
-                      <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-accent/15 text-accent border border-accent/30">
-                        100.%
-                      </span>
-                    )}
-                  </div>
-                  <div className="text-xs text-text-muted mt-0.5">
-                    Restrict connections to your Tailscale network.
-                  </div>
-                </div>
-              </button>
-
-              <AnimatePresence initial={false}>
-                {!tailnetOnly && (
-                  <motion.label
-                    key="allowed-hosts"
-                    initial={{ opacity: 0, height: 0 }}
-                    animate={{ opacity: 1, height: "auto" }}
-                    exit={{ opacity: 0, height: 0 }}
-                    transition={{ duration: 0.18 }}
-                    className="block overflow-hidden"
-                  >
-                    <span className="mb-1.5 block text-label font-medium text-text-muted">Allowed hosts</span>
-                    <input
-                      value={connectionsFrom}
-                      onChange={(e) => setConnectionsFrom(e.target.value)}
-                      placeholder="%"
-                      className="field-input font-mono"
-                    />
-                    <span className="block mt-1 text-micro text-text-subtle">
-                      MySQL pattern. <code className="font-mono">%</code> = any host ·{" "}
-                      <code className="font-mono">192.168.%</code> = a subnet ·{" "}
-                      <code className="font-mono">10.0.0.5</code> = exact IP.
-                    </span>
-                  </motion.label>
-                )}
-              </AnimatePresence>
-            </div>
-          </div>
+          <BuildManifest
+            kind={kind}
+            schema={schema}
+            host={formatConnectionAddress(conn.host, conn.port)}
+            from={effectiveHost}
+            tailnetOnly={tailnetOnly}
+            versioned={versioned}
+            className="md:col-span-2"
+          />
         </div>
 
-        {/* ===== RIGHT: build manifest ===== */}
-        <motion.aside
-          className="col-span-2 relative overflow-hidden rounded-lg border border-border bg-bg p-4"
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          transition={{ duration: 0.15 }}
-        >
-          <div className="mb-3 flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-wider text-text-muted">
-            <span className="size-1.5 rounded-full bg-accent" />
-            build manifest
-          </div>
-
-          <div className="font-mono text-xs leading-[1.7] text-text">
-            <ManifestRow
-              label="kind"
-              value={
-                <span className={kind === "mirror" ? "text-accent" : "text-text"}>
-                  {kind}
-                </span>
-              }
-            />
-            <ManifestRow
-              label="schema"
-              value={schema ? <code className="text-accent">{schema}</code> : <Dim />}
-            />
-            <ManifestRow
-              label="user"
-              value={
-                schema ? (
-                  <code className="text-text-muted">
-                    kdb_{schema.slice(0, 12)}_<span className="text-text-subtle">····</span>
-                  </code>
-                ) : (
-                  <Dim />
-                )
-              }
-            />
-            <ManifestRow
-              label="pass"
-              value={
-                <span className="text-text-muted">
-                  <span className="tracking-[0.25em]">▓▓▓▓▓▓▓▓▓▓▓▓</span>{" "}
-                  <span className="text-text-subtle text-[10px]">24 ch · auto</span>
-                </span>
-              }
-            />
-            <ManifestRow
-              label="host"
-              value={
-                <span className="text-text-muted">
-                  {conn.host}
-                  <span className="text-text-subtle">:{conn.port}</span>
-                </span>
-              }
-            />
-            <ManifestRow
-              label="from"
-              last
-              value={
-                <code className={tailnetOnly ? "text-accent" : "text-text-muted"}>
-                  {effectiveHost}
-                </code>
-              }
-            />
-          </div>
-
-          <div className="mt-4 pt-3 border-t border-dashed border-border">
-            <div className="mb-1.5 font-mono text-[10px] uppercase tracking-wider text-text-subtle">
-              // grant
-            </div>
-            <pre className="font-mono text-[10.5px] leading-relaxed text-text-muted whitespace-pre-wrap break-words">
-              GRANT ALL ON{" "}
-              <span className="text-accent">{schema || "—"}</span>
-              .*
-              {"\n"}TO kdb_{schema ? schema.slice(0, 12) : "—"}_····@
-              <span className={tailnetOnly ? "text-accent" : "text-text"}>{effectiveHost}</span>
-            </pre>
-          </div>
-        </motion.aside>
-
-        {/* ===== ERROR + FOOTER ===== */}
-        <div className="col-span-5 -mt-1">
-          <AnimatePresence>
-            {err && (
-              <motion.p
-                key="err"
-                initial={{ opacity: 0, y: -4 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0 }}
-                className="text-sm text-danger mb-3"
-              >
-                {err}
-              </motion.p>
-            )}
-          </AnimatePresence>
-          <div className="flex items-center justify-end pt-3 border-t border-border">
-            <div className="flex items-center gap-2">
-              <Button type="button" variant="ghost" onClick={closeAll}>
-                Cancel
-              </Button>
-              <Button type="submit" loading={mutation.isPending} disabled={!displayName.trim()}>
-                Provision database
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none">
-                  <path
-                    d="M5 12h14M13 6l6 6-6 6"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                </svg>
-              </Button>
-            </div>
-          </div>
-        </div>
-      </form>
-    </Dialog>
+        {mutation.isError && (
+          <Alert variant="danger" title="Could not provision the database">
+            {errorMessage(mutation.error)}
+          </Alert>
+        )}
+      </DialogBody>
+      <DialogFooter>
+        <Button variant="ghost" onClick={onCancel} disabled={mutation.isPending}>
+          Cancel
+        </Button>
+        <Button type="submit" loading={mutation.isPending}>
+          {mutation.isPending ? "Provisioning…" : "Provision database"}
+          {!mutation.isPending && <ArrowRight />}
+        </Button>
+      </DialogFooter>
+    </form>
   );
 }
 
-// ---- helpers ----
-
-function TypeCard({
-  active,
-  onClick,
-  title,
-  desc,
-  icon,
-}: {
-  active: boolean;
-  onClick: () => void;
-  title: string;
-  desc: string;
-  icon: React.ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={cn(
-        "relative text-left rounded-lg border p-3 transition-all overflow-hidden group",
-        active
-          ? "border-accent/70 bg-accent/[0.06]"
-          : "border-border bg-bg-subtle hover:border-border-strong",
-      )}
-    >
-      {active && (
-        <motion.span
-          layoutId="type-active"
-          className="absolute inset-0 rounded-lg border border-accent/40 pointer-events-none"
-          transition={{ type: "spring", stiffness: 380, damping: 32 }}
-        />
-      )}
-      <div className="flex items-center justify-between mb-1.5">
-        <span className={cn(active ? "text-accent" : "text-text-muted")}>{icon}</span>
-        <span
-          className={cn(
-            "size-3.5 rounded-full border transition-colors",
-            active ? "bg-accent border-accent" : "border-border-strong",
-          )}
-        />
-      </div>
-      <div className="text-sm font-medium">{title}</div>
-      <div className="text-micro text-text-muted mt-0.5">{desc}</div>
-    </button>
-  );
+export interface AccessOptionsProps {
+  tailnetOnly: boolean;
+  onTailnetOnlyChange: (value: boolean) => void;
+  connectionsFrom: string;
+  onConnectionsFromChange: (value: string) => void;
+  error: string | null;
+  disabled?: boolean;
 }
 
-function ManifestRow({
-  label,
-  value,
-  last,
-}: {
-  label: string;
-  value: React.ReactNode;
-  last?: boolean;
-}) {
+export function AccessOptions({
+  tailnetOnly,
+  onTailnetOnlyChange,
+  connectionsFrom,
+  onConnectionsFromChange,
+  error,
+  disabled,
+}: AccessOptionsProps) {
+  const term = useTermNode();
   return (
-    <div className="flex items-baseline gap-2">
-      <span className="text-text-subtle select-none">{last ? "└─" : "├─"}</span>
-      <span className="text-text-subtle uppercase text-[10px] tracking-wider w-10 shrink-0">
-        {label}
-      </span>
-      <span className="flex-1 min-w-0 truncate">{value}</span>
+    <div className="space-y-3">
+      <div className="text-label font-medium text-text-muted">Access</div>
+      <Switch
+        checked={tailnetOnly}
+        onChange={onTailnetOnlyChange}
+        disabled={disabled}
+        label="Tailnet only"
+        description="Accept connections from your Tailscale network only (100.%)."
+      />
+      {!tailnetOnly && (
+        <Field label={term("connectionsFrom")} error={error} hint={term("connectionsFromHelp")}>
+          <Input
+            mono
+            value={connectionsFrom}
+            onChange={(e) => onConnectionsFromChange(e.target.value)}
+            placeholder="%"
+            autoComplete="off"
+            spellCheck={false}
+            disabled={disabled}
+          />
+        </Field>
+      )}
     </div>
+  );
+}
+
+export interface BuildManifestProps {
+  kind: string;
+  schema: string;
+  host: string;
+  from: string;
+  tailnetOnly?: boolean;
+  versioned?: boolean;
+  extra?: { label: string; value: ReactNode }[];
+  className?: string;
+}
+
+export function BuildManifest({ kind, schema, host, from, tailnetOnly, versioned, extra = [], className }: BuildManifestProps) {
+  const user = schema ? `ld_${schema.slice(0, 12)}_····` : null;
+  const rows: { label: string; value: ReactNode }[] = [
+    { label: "kind", value: <span className="text-text">{kind}</span> },
+    { label: "schema", value: schema ? <span className="text-accent">{schema}</span> : <Dim /> },
+    { label: "user", value: user ? <span className="text-text-muted">{user}</span> : <Dim /> },
+    {
+      label: "pass",
+      value: (
+        <span className="text-text-muted">
+          <span aria-hidden className="tracking-[0.15em]">••••••••</span>
+          <span className="sr-only">generated</span> <span className="text-text-subtle">24 ch · auto</span>
+        </span>
+      ),
+    },
+    { label: "host", value: <span className="text-text-muted">{host}</span> },
+    { label: "from", value: <span className={tailnetOnly ? "text-accent" : "text-text-muted"}>{from}</span> },
+    { label: "history", value: <span className="text-text-muted">{versioned ? "versioned" : "daily checkpoints"}</span> },
+    ...extra,
+  ];
+  return (
+    <aside
+      aria-label="Build manifest"
+      className={cn("h-fit min-w-0 rounded-lg border border-border bg-bg-inset p-4", className)}
+    >
+      <div className="mb-3 flex items-center gap-1.5 font-mono text-micro text-text-subtle">
+        <span aria-hidden className="size-1.5 rounded-full bg-accent" />
+        build manifest
+      </div>
+      <dl className="space-y-1 font-mono text-code">
+        {rows.map((row, i) => (
+          <div key={row.label} className="flex min-w-0 items-baseline gap-2">
+            <span aria-hidden className="select-none text-text-subtle">
+              {i === rows.length - 1 ? "└─" : "├─"}
+            </span>
+            <dt className="w-14 shrink-0 text-micro text-text-subtle">{row.label}</dt>
+            <dd className="min-w-0 flex-1 truncate">{row.value}</dd>
+          </div>
+        ))}
+      </dl>
+      <div className="mt-4 border-t border-dashed border-border pt-3">
+        <div className="mb-1.5 font-mono text-micro text-text-subtle">grant</div>
+        <pre className="whitespace-pre-wrap break-words font-mono text-micro leading-relaxed text-text-muted">
+          GRANT ALL ON <span className="text-accent">{schema || "…"}</span>.*{"\n"}TO {user ?? "…"}@
+          <span className={tailnetOnly ? "text-accent" : "text-text"}>&apos;{from}&apos;</span>
+        </pre>
+      </div>
+    </aside>
   );
 }
 

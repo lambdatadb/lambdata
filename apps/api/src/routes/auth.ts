@@ -1,15 +1,21 @@
 import { Hono } from "hono";
-import { setCookie, deleteCookie } from "hono/cookie";
 import { HTTPException } from "hono/http-exception";
-import type { AuthResponse } from "@kilndb/shared";
+import { z } from "zod";
+import type { AuthResponse } from "@lambdata/shared";
 import { audit, users } from "../db/queries";
-import { verifyPassword } from "../auth/password";
-import { COOKIE_MAX_AGE, COOKIE_NAME, signJwt } from "../auth/jwt";
-import { requireAuth, type AuthVariables } from "../auth/middleware";
+import { checkPassword } from "../auth/password";
+import { clearSessionCookies, issueSessionCookie } from "../auth/jwt";
+import { requireAuth, toPublicUser, type AuthVariables } from "../auth/middleware";
+import { revokeConsoleSessions } from "../auth/tokenVersions";
 import { bodyEmail, clientIp, rateLimit } from "../util/rateLimit";
-import { env } from "../env";
+import { parseJson } from "../util/validate";
 
 export const authRoute = new Hono<{ Variables: AuthVariables }>();
+
+const loginSchema = z.object({
+  email: z.string({ error: "email and password required" }).trim().min(1, "email and password required"),
+  password: z.string({ error: "email and password required" }).min(1, "email and password required"),
+});
 
 const loginIpLimit = rateLimit({ windowMs: 60_000, max: 10, key: (c) => `ip:${clientIp(c)}` });
 const loginEmailLimit = rateLimit({
@@ -22,43 +28,29 @@ const loginEmailLimit = rateLimit({
 });
 
 authRoute.post("/login", loginIpLimit, loginEmailLimit, async (c) => {
-  const body = (await c.req.json()) as { email?: string; password?: string };
-  if (!body.email || !body.password) {
-    throw new HTTPException(400, { message: "email and password required" });
-  }
-  const u = users.byEmail(body.email.toLowerCase().trim());
-  if (!u || !(await verifyPassword(body.password, u.passwordHash))) {
+  const body = await parseJson(c, loginSchema);
+  const u = users.byEmail(body.email.toLowerCase());
+  const ok = await checkPassword(body.password, u?.passwordHash);
+  if (!u || !ok) {
     throw new HTTPException(401, { message: "invalid credentials" });
   }
   users.updateLastLogin(u.id);
   audit.log(u.id, "auth.login", null, null);
-  const token = await signJwt(u.id, u.role);
-  setCookie(c, COOKIE_NAME, token, {
-    httpOnly: true,
-    sameSite: "Lax",
-    path: "/",
-    maxAge: COOKIE_MAX_AGE,
-    secure: env.cookieSecure,
-  });
-  const res: AuthResponse = {
-    user: {
-      id: u.id,
-      email: u.email,
-      displayName: u.displayName,
-      role: u.role,
-      experienceLevel: u.experienceLevel,
-      dataViewEnabled: u.dataViewEnabled,
-      colorTheme: u.colorTheme,
-      vitalsChartStyle: u.vitalsChartStyle,
-      createdAt: u.createdAt,
-      lastLoginAt: Date.now(),
-    },
-  };
+  await issueSessionCookie(c, u.id, u.role);
+  const res: AuthResponse = { user: { ...toPublicUser(u), lastLoginAt: Date.now() } };
   return c.json(res);
 });
 
 authRoute.post("/logout", (c) => {
-  deleteCookie(c, COOKIE_NAME, { path: "/" });
+  clearSessionCookies(c);
+  return c.json({ ok: true });
+});
+
+authRoute.post("/logout-all", requireAuth, (c) => {
+  const user = c.get("user");
+  revokeConsoleSessions(user.id);
+  audit.log(user.id, "auth.logout_all", user.id, null);
+  clearSessionCookies(c);
   return c.json({ ok: true });
 });
 

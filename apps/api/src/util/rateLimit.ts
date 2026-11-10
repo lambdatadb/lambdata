@@ -1,5 +1,4 @@
 import type { Context, MiddlewareHandler } from "hono";
-import { getConnInfo } from "hono/bun";
 
 type Bucket = { count: number; resetAt: number };
 
@@ -36,18 +35,57 @@ export function rateLimit(opts: {
   };
 }
 
-export function clientIp(c: Context): string {
-  try {
-    return getConnInfo(c).remote.address ?? "local";
-  } catch {
-    return "local";
-  }
+export interface FailureLimiter {
+  blockedFor(key: string): number;
+  fail(key: string): void;
+  clear(key: string): void;
+  reset(): void;
 }
+
+export function failureLimiter(opts: { windowMs: number; max: number }): FailureLimiter {
+  const buckets = new Map<string, Bucket>();
+  const current = (key: string, now: number): Bucket | null => {
+    const bucket = buckets.get(key);
+    if (!bucket) return null;
+    if (now >= bucket.resetAt) {
+      buckets.delete(key);
+      return null;
+    }
+    return bucket;
+  };
+  return {
+    blockedFor(key) {
+      const now = Date.now();
+      const bucket = current(key, now);
+      if (!bucket || bucket.count < opts.max) return 0;
+      return Math.max(1, Math.ceil((bucket.resetAt - now) / 1000));
+    },
+    fail(key) {
+      const now = Date.now();
+      if (buckets.size > 10_000) {
+        for (const [k, b] of buckets) {
+          if (now >= b.resetAt) buckets.delete(k);
+        }
+      }
+      const bucket = current(key, now) ?? { count: 0, resetAt: now + opts.windowMs };
+      bucket.count += 1;
+      buckets.set(key, bucket);
+    },
+    clear(key) {
+      buckets.delete(key);
+    },
+    reset() {
+      buckets.clear();
+    },
+  };
+}
+
+export { clientIp } from "../network/request";
 
 export async function bodyEmail(c: Context): Promise<string | null> {
   try {
-    const body = (await c.req.json()) as { email?: string };
-    if (typeof body.email !== "string") return null;
+    const body = JSON.parse(await c.req.text()) as { email?: unknown } | null;
+    if (!body || typeof body.email !== "string") return null;
     const email = body.email.toLowerCase().trim();
     return email || null;
   } catch {

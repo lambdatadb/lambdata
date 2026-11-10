@@ -1,93 +1,248 @@
-import { useQuery } from "@tanstack/react-query";
-import { api } from "../lib/api";
+import { Fragment, useMemo, useState } from "react";
+import { Link } from "react-router-dom";
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
+import type { AuditLogEntry } from "@lambdata/shared";
+import { ChevronRight, History, RotateCcw, Search, ShieldCheck } from "lucide-react";
+import { api, errorMessage } from "../lib/api";
+import { useAuth } from "../lib/auth";
+import { formatDate, formatRelativeTime } from "../lib/format";
 import { PageHeader } from "../components/layout/PageShell";
-import { Badge } from "../components/ui/Badge";
-import { Card } from "../components/ui/Card";
-import { Table, TBody, TD, TH, THead, TR, TableEmpty, TableSkeleton } from "../components/ui/Table";
-import { formatRelativeTime } from "../lib/format";
+import {
+  Alert,
+  Avatar,
+  Badge,
+  Button,
+  Card,
+  CodeBlock,
+  EmptyState,
+  Input,
+  TBody,
+  TD,
+  TH,
+  THead,
+  TR,
+  Table,
+  TableSkeleton,
+} from "../components/ui";
+import { isForbidden, pollEvery, useAuditTargets } from "../lib/queries";
 
-interface AuditLog {
-  id: number;
-  user_id: string | null;
-  user_email: string | null;
-  user_display_name: string | null;
-  action: string;
-  target: string | null;
-  details: string | null;
-  at: number;
+const PAGE = 100;
+const MAX = 500;
+
+export function auditOutcome(details: string | null): { withErrors: boolean; forced: boolean } {
+  if (!details) return { withErrors: false, forced: false };
+  try {
+    const parsed = JSON.parse(details) as { outcome?: unknown; forced?: unknown } | null;
+    if (!parsed || typeof parsed !== "object") return { withErrors: false, forced: false };
+    return { withErrors: parsed.outcome === "done-with-errors", forced: parsed.forced === true };
+  } catch {
+    return { withErrors: false, forced: false };
+  }
+}
+
+function prettyDetails(details: string | null): string | null {
+  if (!details) return null;
+  try {
+    const parsed: unknown = JSON.parse(details);
+    if (parsed === null || (typeof parsed === "object" && Object.keys(parsed as object).length === 0)) return null;
+    return JSON.stringify(parsed, null, 2);
+  } catch {
+    return details;
+  }
 }
 
 export function Activity() {
-  const { data, isLoading } = useQuery({
-    queryKey: ["audit-logs"],
-    queryFn: () => api.get<{ logs: AuditLog[] }>("/system/audit-logs?limit=100"),
-    refetchInterval: 10_000,
+  const { user } = useAuth();
+  const isAdmin = user?.role === "admin";
+  const [limit, setLimit] = useState(PAGE);
+  const [filter, setFilter] = useState("");
+  const [expanded, setExpanded] = useState<number | null>(null);
+
+  const logsQuery = useQuery({
+    queryKey: ["audit-logs", { limit }],
+    queryFn: () => api.get<{ logs: AuditLogEntry[] }>(`/system/audit-logs?limit=${limit}`),
+    enabled: isAdmin,
+    refetchInterval: pollEvery(10_000),
+    placeholderData: keepPreviousData,
   });
 
-  const list = data?.logs ?? [];
+  const logs = logsQuery.data?.logs ?? [];
+  const targetOf = useAuditTargets(isAdmin);
+  const needle = filter.trim().toLowerCase();
+  const visible = useMemo(
+    () =>
+      needle
+        ? logs.filter((log) =>
+            [log.action, log.target, targetOf(log.target)?.label, log.user_email, log.user_display_name, log.details]
+              .filter(Boolean)
+              .some((v) => String(v).toLowerCase().includes(needle)),
+          )
+        : logs,
+    [logs, needle, targetOf],
+  );
+
+  const header = <PageHeader title="Activity" subtitle="Every change made on this instance, newest first." />;
+
+  if (!isAdmin || isForbidden(logsQuery.error)) {
+    return (
+      <>
+        {header}
+        <EmptyState
+          icon={ShieldCheck}
+          title="Admins only"
+          description="The activity log can include connection details and user emails, so only admins can read it. Ask an admin if you need to check a change."
+        />
+      </>
+    );
+  }
 
   return (
     <>
-      <PageHeader title="Activity Log" subtitle="Audit trail of events executed on this KilnDB instance." />
+      {header}
+      <div className="space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <Input
+            aria-label="Filter activity"
+            placeholder="Filter by action, user or target"
+            leading={<Search />}
+            wrapperClassName="sm:max-w-xs"
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+          />
+          {logsQuery.data && (
+            <span className="text-label text-text-muted">
+              {needle ? `${visible.length} of ${logs.length} events` : `Latest ${logs.length} events`}
+            </span>
+          )}
+        </div>
 
-      <Card className="p-0 overflow-hidden">
-        <Table flush>
-          <THead>
-            <tr>
-              <TH>User</TH>
-              <TH>Action</TH>
-              <TH>Target</TH>
-              <TH>Details</TH>
-              <TH className="text-right">Time</TH>
-            </tr>
-          </THead>
-          <TBody>
-            {isLoading ? (
-              <TableSkeleton rows={6} cols={5} />
-            ) : list.length === 0 ? (
-              <TableEmpty colSpan={5}>No activity recorded yet.</TableEmpty>
-            ) : (
-              list.map((log) => {
-                let parsedDetails = "";
-                if (log.details) {
-                  try {
-                    parsedDetails = JSON.stringify(JSON.parse(log.details));
-                  } catch {
-                    parsedDetails = log.details;
-                  }
-                }
-                return (
-                  <TR key={log.id}>
-                    <TD className="whitespace-nowrap">
-                      <div className="flex items-center gap-2">
-                        <div className="size-5 rounded-full bg-accent/10 border border-accent/30 flex items-center justify-center text-micro text-accent font-semibold">
-                          {(log.user_display_name ?? log.user_email ?? "S")[0]?.toUpperCase()}
-                        </div>
-                        <div>
-                          <div className="text-label font-medium text-text">{log.user_display_name ?? "System"}</div>
-                          {log.user_email && <div className="text-micro text-text-subtle">{log.user_email}</div>}
-                        </div>
-                      </div>
-                    </TD>
-                    <TD className="whitespace-nowrap">
-                      <Badge tone="muted" className="font-mono">{log.action.replace(/\./g, " · ")}</Badge>
-                    </TD>
-                    <TD className="font-mono text-label text-text-muted whitespace-nowrap">
-                      {log.target ?? "—"}
-                    </TD>
-                    <TD className="max-w-xs truncate font-mono text-label text-text-subtle" title={parsedDetails}>
-                      {parsedDetails || "—"}
-                    </TD>
-                    <TD className="text-right text-label text-text-subtle whitespace-nowrap">
-                      {formatRelativeTime(log.at)}
+        {logsQuery.isError && !logsQuery.data ? (
+          <Alert
+            variant="danger"
+            title="Could not load the activity log"
+            action={
+              <Button size="xs" variant="secondary" onClick={() => logsQuery.refetch()}>
+                <RotateCcw aria-hidden /> Retry
+              </Button>
+            }
+          >
+            {errorMessage(logsQuery.error, "The server did not answer.")}
+          </Alert>
+        ) : !logsQuery.isPending && logs.length === 0 ? (
+          <EmptyState icon={History} title="No activity yet" description="Changes to databases, users and settings are recorded here." />
+        ) : (
+          <Card flush>
+            <Table flush caption="Activity log">
+              <THead>
+                <TR>
+                  <TH className="w-28">When</TH>
+                  <TH>Who</TH>
+                  <TH>Action</TH>
+                  <TH className="hidden md:table-cell">Target</TH>
+                  <TH className="w-px">
+                    <span className="sr-only">Details</span>
+                  </TH>
+                </TR>
+              </THead>
+              <TBody>
+                {logsQuery.isPending ? (
+                  <TableSkeleton rows={8} cols={4} />
+                ) : visible.length === 0 ? (
+                  <TR>
+                    <TD colSpan={5} className="py-10 text-center text-text-muted">
+                      Nothing matches “{filter.trim()}”.
                     </TD>
                   </TR>
-                );
-              })
+                ) : (
+                  visible.map((log) => {
+                    const details = prettyDetails(log.details);
+                    const open = expanded === log.id;
+                    const who = log.user_display_name || log.user_email || "System";
+                    const target = targetOf(log.target);
+                    const outcome = auditOutcome(log.details);
+                    return (
+                      <Fragment key={log.id}>
+                        <TR className={open ? "border-b-0" : undefined}>
+                          <TD className="whitespace-nowrap text-label text-text-muted" title={formatDate(log.at)}>
+                            {formatRelativeTime(log.at)}
+                          </TD>
+                          <TD>
+                            <div className="flex min-w-0 items-center gap-2.5">
+                              <Avatar size="sm" name={log.user_id ? who : "System"} />
+                              <div className="min-w-0">
+                                <div className="truncate text-body text-text">{who}</div>
+                                {log.user_display_name && log.user_email && (
+                                  <div className="truncate text-micro text-text-subtle">{log.user_email}</div>
+                                )}
+                              </div>
+                            </div>
+                          </TD>
+                          <TD>
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <Badge variant="muted" mono>
+                                {log.action}
+                              </Badge>
+                              {outcome.forced && <Badge variant="warn">forced</Badge>}
+                              {outcome.withErrors && <Badge variant="warn">finished with errors</Badge>}
+                            </div>
+                            {target && (
+                              <div className="mt-1 max-w-[12rem] truncate text-micro text-text-subtle md:hidden">{target.label}</div>
+                            )}
+                          </TD>
+                          <TD className="hidden max-w-[16rem] truncate text-text-muted md:table-cell" title={log.target ?? undefined}>
+                            {!target ? (
+                              "—"
+                            ) : target.href ? (
+                              <Link to={target.href} className="text-text underline decoration-border-control underline-offset-4 hover:decoration-text">
+                                {target.label}
+                              </Link>
+                            ) : (
+                              <span className="font-mono text-code">{target.label}</span>
+                            )}
+                          </TD>
+                          <TD className="text-right">
+                            {details && (
+                              <Button
+                                variant="ghost"
+                                size="icon-xs"
+                                aria-expanded={open}
+                                aria-controls={`activity-${log.id}`}
+                                aria-label={`Details of ${log.action}`}
+                                onClick={() => setExpanded(open ? null : log.id)}
+                              >
+                                <ChevronRight className={open ? "rotate-90 transition-transform" : "transition-transform"} aria-hidden />
+                              </Button>
+                            )}
+                          </TD>
+                        </TR>
+                        {open && details && (
+                          <TR id={`activity-${log.id}`} className="hover:bg-transparent">
+                            <TD colSpan={5} className="pb-4 pt-0">
+                              <CodeBlock code={details} language="json" wrap wrapToggle={false} maxHeight={260} />
+                            </TD>
+                          </TR>
+                        )}
+                      </Fragment>
+                    );
+                  })
+                )}
+              </TBody>
+            </Table>
+            {logs.length >= limit && limit < MAX && (
+              <div className="flex justify-center border-t border-border px-5 py-3">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  loading={logsQuery.isFetching && logsQuery.isPlaceholderData}
+                  onClick={() => setLimit((l) => Math.min(MAX, l + PAGE))}
+                >
+                  Show older events
+                </Button>
+              </div>
             )}
-          </TBody>
-        </Table>
-      </Card>
+          </Card>
+        )}
+      </div>
     </>
   );
 }

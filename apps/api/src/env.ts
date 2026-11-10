@@ -1,18 +1,29 @@
 import { mkdirSync, existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { readPointer } from "./util/pointer";
+import { LEGACY } from "./util/legacy";
+import { readEnv } from "./util/readEnv";
+
+export { ENV_PREFIX, readEnv } from "./util/readEnv";
 
 const ROOT = resolve(import.meta.dir, "../../..");
 
+function positiveInt(raw: string | undefined, fallback: number): number {
+  const n = Number(raw);
+  return Number.isInteger(n) && n > 0 ? n : fallback;
+}
+
+function localDataDir(): string {
+  const current = join(ROOT, ".lambdata");
+  const legacy = join(ROOT, LEGACY.localDataDirName);
+  return !existsSync(current) && existsSync(legacy) ? legacy : current;
+}
+
 function defaultDataDir(): string {
-  return process.env.KILNDB_DATA_DIR ?? join(ROOT, ".kilndb");
+  return readEnv("DATA_DIR") ?? localDataDir();
 }
 
 let _dataDir = readPointer() ?? defaultDataDir();
-
-export function getDataDir(): string {
-  return _dataDir;
-}
 
 export function setDataDir(path: string): void {
   _dataDir = path;
@@ -33,6 +44,12 @@ export const env = {
   get snapshotsDir(): string {
     return join(_dataDir, "snapshots");
   },
+  get checkpointsDir(): string {
+    return join(_dataDir, "checkpoints");
+  },
+  get importsDir(): string {
+    return join(_dataDir, "imports");
+  },
   get storageDir(): string {
     return join(_dataDir, "storage");
   },
@@ -45,18 +62,18 @@ export const env = {
   get masterKeyPath(): string {
     return join(_dataDir, "master.key");
   },
-  mariadbPort: Number(process.env.KILNDB_MARIADB_PORT ?? 3307),
-  mariadbBind: process.env.KILNDB_MARIADB_BIND ?? "127.0.0.1",
-  mariadbBin: process.env.KILNDB_MARIADB_BIN ?? null,
-  rootUser: "kilndb_root",
-  isProd: process.env.NODE_ENV === "production",
-  webOrigin: process.env.KILNDB_WEB_ORIGIN ?? "http://localhost:5173",
-  extraOrigins: (process.env.KILNDB_EXTRA_ORIGINS ?? "")
+  mariadbPort: Number(readEnv("MARIADB_PORT") ?? 3307),
+  mariadbBind: readEnv("MARIADB_BIND") ?? "127.0.0.1",
+  mariadbBin: readEnv("MARIADB_BIN") ?? null,
+  rootUser: "lambdata_root",
+  webOrigin: readEnv("WEB_ORIGIN") ?? "http://localhost:5173",
+  extraOrigins: (readEnv("EXTRA_ORIGINS") ?? "")
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean),
-  cookieSecure: process.env.KILNDB_COOKIE_SECURE === "1",
-  webDist: process.env.KILNDB_WEB_DIST ?? null,
+  cookieSecure: readEnv("COOKIE_SECURE") === "1",
+  webDist: readEnv("WEB_DIST") ?? null,
+  maxConcurrentJobs: positiveInt(readEnv("MAX_CONCURRENT_JOBS"), 3),
 };
 
 export function ensureDataDirs(): void {
@@ -64,6 +81,8 @@ export function ensureDataDirs(): void {
     env.dataDir,
     env.mariadbDataDir,
     env.snapshotsDir,
+    env.checkpointsDir,
+    env.importsDir,
     env.storageDir,
     env.functionsDir,
     env.logsDir,

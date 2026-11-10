@@ -1,38 +1,123 @@
-import { Hono } from "hono";
-import { setCookie } from "hono/cookie";
+import { Hono, type Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { homedir } from "node:os";
-import type { ExperienceLevel, SetupState, DataDirMigrationResponse } from "@kilndb/shared";
+import { z } from "zod";
+import type { DataDirMigrationResponse, SetupGate, SetupState } from "@lambdata/shared";
 import { audit, settings, users } from "../db/queries";
 import { hashPassword } from "../auth/password";
-import { COOKIE_MAX_AGE, COOKIE_NAME, signJwt } from "../auth/jwt";
+import { issueSessionCookie } from "../auth/jwt";
+import { settleAppAuthUpgrade } from "../auth/appJwt";
+import { announceSetupToken, expireSetupToken, setupTokenActive, verifySetupToken } from "../auth/setupToken";
+import { isLocalRequest } from "../network/request";
 import { newId } from "../util/id";
 import { env } from "../env";
-import { migrateDataDir } from "../util/dataDirMigration";
+import { DataDirMigrationError, migrateDataDir } from "../util/dataDirMigration";
 import { readPointer } from "../util/pointer";
+import { clientIp, failureLimiter } from "../util/rateLimit";
+import { parseJson } from "../util/validate";
 
 export const setupRoute = new Hono();
 
+export const SETUP_TOKEN_MISSING = "setup_token_required";
+export const SETUP_TOKEN_INVALID = "setup_token_invalid";
+
+const FAILURE_WINDOW_MS = 15 * 60_000;
+const MAX_FAILURES = 10;
+
+export const setupTokenFailures = failureLimiter({ windowMs: FAILURE_WINDOW_MS, max: MAX_FAILURES });
+
+const tokenField = z.string().max(200, "setup token is too long").optional();
+
+const dataDirSchema = z.object({
+  path: z.string({ error: "path required" }).trim().min(1, "path required"),
+  setupToken: tokenField,
+});
+
+const completeSchema = z.object({
+  email: z.string({ error: "email and password required" }).trim().min(1, "email and password required"),
+  password: z.string({ error: "email and password required" }).min(8, "password must be at least 8 characters"),
+  displayName: z.string().trim().max(200, "display name is too long").nullable().optional(),
+  experienceLevel: z.enum(["novice", "advanced"]).optional(),
+  setupToken: tokenField,
+});
+
+const tokenSchema = z.object({ setupToken: tokenField });
+
+function setupComplete(): boolean {
+  return settings.get("setup_complete") === "1";
+}
+
+export function refuseToken(c: Context, setupToken: string | undefined): Response | null {
+  if (isLocalRequest(c)) return null;
+  const key = `ip:${clientIp(c)}`;
+  const wait = setupTokenFailures.blockedFor(key);
+  if (wait > 0) {
+    return c.json(
+      { error: "Too many wrong setup tokens. Wait a few minutes and try again.", code: SETUP_TOKEN_INVALID },
+      429,
+      { "Retry-After": String(wait) },
+    );
+  }
+  if (!setupTokenActive()) announceSetupToken();
+  const token = setupToken?.trim() ?? "";
+  if (!token) {
+    return c.json(
+      {
+        error: "Enter the setup token from the LambData log. It is printed when LambData starts, on the line that says “LambData first-run setup token”.",
+        code: SETUP_TOKEN_MISSING,
+      },
+      403,
+    );
+  }
+  if (!verifySetupToken(token)) {
+    setupTokenFailures.fail(key);
+    return c.json(
+      {
+        error: "That setup token is not right. Copy the most recent one from the LambData log; restarting LambData prints a new token.",
+        code: SETUP_TOKEN_INVALID,
+      },
+      403,
+    );
+  }
+  return null;
+}
+
 setupRoute.get("/state", (c) => {
-  const res: SetupState = {
-    needsSetup: settings.get("setup_complete") !== "1",
-    dataDir: env.dataDir,
+  const needsSetup = !setupComplete();
+  const local = isLocalRequest(c);
+  const res: SetupState & SetupGate = {
+    needsSetup,
+    dataDir: needsSetup ? env.dataDir : "",
     dataDirConfigured: readPointer() !== null,
-    homeDir: homedir(),
+    homeDir: needsSetup && local ? homedir() : "",
+    tokenRequired: needsSetup && !local,
   };
   return c.json(res);
 });
 
+setupRoute.post("/token", async (c) => {
+  if (setupComplete()) {
+    throw new HTTPException(409, { message: "setup already completed" });
+  }
+  const { setupToken } = await parseJson(c, tokenSchema);
+  const refused = refuseToken(c, setupToken);
+  if (refused) return refused;
+  return c.json({ ok: true });
+});
+
 setupRoute.post("/data-dir", async (c) => {
-  if (settings.get("setup_complete") === "1") {
+  if (setupComplete()) {
     throw new HTTPException(409, { message: "setup already completed; use authenticated endpoint" });
   }
-  const body = (await c.req.json()) as { path?: string };
-  if (!body.path) throw new HTTPException(400, { message: "path required" });
+  const { path, setupToken } = await parseJson(c, dataDirSchema);
+  const refused = refuseToken(c, setupToken);
+  if (refused) return refused;
 
   try {
-    const result = await migrateDataDir({ newPath: body.path });
+    const result = await migrateDataDir({ newPath: path });
     audit.log(null, "data_dir.initial", null, { path: result.newPath });
+    settleAppAuthUpgrade();
+    if (setupComplete()) expireSetupToken();
     const res: DataDirMigrationResponse = {
       ok: true,
       oldPath: result.oldPath,
@@ -42,46 +127,36 @@ setupRoute.post("/data-dir", async (c) => {
     };
     return c.json(res);
   } catch (err) {
+    if (err instanceof HTTPException) throw err;
     const message = err instanceof Error ? err.message : String(err);
-    throw new HTTPException(500, { message });
+    throw new HTTPException(err instanceof DataDirMigrationError ? err.status : 500, { message });
   }
 });
 
 setupRoute.post("/complete", async (c) => {
-  if (settings.get("setup_complete") === "1") {
+  if (setupComplete()) {
     throw new HTTPException(409, { message: "setup already completed" });
   }
-  const body = (await c.req.json()) as {
-    email?: string;
-    password?: string;
-    displayName?: string;
-    experienceLevel?: ExperienceLevel;
-  };
-  if (!body.email || !body.password) {
-    throw new HTTPException(400, { message: "email and password required" });
+  const body = await parseJson(c, completeSchema);
+  const refused = refuseToken(c, body.setupToken);
+  if (refused) return refused;
+  const passwordHash = await hashPassword(body.password);
+  if (setupComplete()) {
+    throw new HTTPException(409, { message: "setup already completed" });
   }
-  if (body.password.length < 8) {
-    throw new HTTPException(400, { message: "password must be at least 8 characters" });
-  }
-  const level: ExperienceLevel = body.experienceLevel === "novice" ? "novice" : "advanced";
   const id = newId("u");
+  const email = body.email.toLowerCase();
   users.insert({
     id,
-    email: body.email.toLowerCase().trim(),
-    passwordHash: await hashPassword(body.password),
-    displayName: body.displayName ?? null,
+    email,
+    passwordHash,
+    displayName: body.displayName || null,
     role: "admin",
-    experienceLevel: level,
+    experienceLevel: body.experienceLevel ?? "advanced",
   });
   settings.set("setup_complete", "1");
-  audit.log(id, "setup.complete", null, { email: body.email });
-  const token = await signJwt(id, "admin");
-  setCookie(c, COOKIE_NAME, token, {
-    httpOnly: true,
-    sameSite: "Lax",
-    path: "/",
-    maxAge: COOKIE_MAX_AGE,
-    secure: env.cookieSecure,
-  });
+  expireSetupToken();
+  audit.log(id, "setup.complete", null, { email });
+  await issueSessionCookie(c, id, "admin");
   return c.json({ ok: true });
 });

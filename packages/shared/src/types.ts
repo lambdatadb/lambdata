@@ -1,6 +1,8 @@
+import type { CheckpointHealthDetail } from "./checkpoints";
+
 export type Role = "admin" | "db_owner" | "viewer";
 export type ExperienceLevel = "novice" | "advanced";
-export type ColorTheme = "ember" | "tide" | "grove" | "orchid";
+export type ColorTheme = "lime" | "ember" | "tide" | "grove" | "orchid";
 export type VitalsChartStyle = "area" | "capsules";
 export type DatabaseKind = "standard" | "mirror";
 export type DatabaseStatus = "active" | "suspended" | "deleting";
@@ -30,6 +32,9 @@ export interface AppAuthSettings {
   allowSignup: boolean;
   tokenTtlSeconds: number;
   issuer: string;
+  signupDisabledByUpgrade?: boolean;
+  signupRefusedCount?: number;
+  signupRefusedLastAt?: number | null;
 }
 
 export interface StorageBucket {
@@ -178,6 +183,10 @@ export interface Database {
   lanExposed: boolean;
   createdAt: number;
   status: DatabaseStatus;
+  versioned: boolean;
+  baseCheckpointId: string | null;
+  baseShortHash: string | null;
+  showInVitals: boolean;
 }
 
 export interface DatabaseCredentials {
@@ -279,6 +288,18 @@ export interface AppSettings {
   dataDir: string;
   pointerPath: string;
   dataDirFreeBytes: number | null;
+  limits?: SettingsLimits;
+}
+
+export interface SettingsLimits {
+  diskFloorBytes: number;
+  diskWarnBytes: number;
+  diskLow: boolean;
+  importMaxBytes: number;
+  importMaxPendingUploads: number;
+  importMaxPendingBytes: number;
+  checkpointMaxAutoRetention: number;
+  checkpointMinIntervalHours: number;
 }
 
 export interface PathValidationResponse {
@@ -320,10 +341,13 @@ export interface AuditLogEntry {
   user_display_name: string | null;
 }
 
+export type MariaDbState = "stopped" | "starting" | "running" | "restarting" | "stopping" | "failed";
+
 export interface HealthDetail {
   ok: boolean;
-  mariadb: { ok: boolean; error?: string };
-  workers: { metrics: boolean; sync: boolean; snapshots: boolean };
+  mariadb: { ok: boolean; error?: string; state: MariaDbState; restarts: number };
+  workers: { metrics: boolean; sync: boolean; checkpoints: boolean };
+  checkpoints?: CheckpointHealthDetail;
   uptimeSec: number;
 }
 
@@ -343,7 +367,13 @@ export interface DashboardSummary {
   databases: { total: number; active: number; mirrors: number };
   latestMetrics: DashboardSummaryDbMetrics[];
   storage: { buckets: number; objects: number; totalSizeBytes: number };
-  snapshots: { total: number; lastAt: number | null; last24hCount: number };
+  checkpoints: {
+    total: number;
+    lastAt: number | null;
+    last24hCount: number;
+    storedBytes: number;
+    versionedDatabases: number;
+  };
   sync: { mirrors: number; ok: number; failing: number; lastError: string | null };
   realtime: { connections: number; channels: number; messagesSent: number };
   functions: { total: number; invocations24h: number };

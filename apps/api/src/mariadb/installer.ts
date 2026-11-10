@@ -6,6 +6,7 @@ const ADMIN_CANDIDATES = ["mariadb-admin", "mysqladmin"];
 const CLIENT_CANDIDATES = ["mariadb", "mysql"];
 const DUMP_CANDIDATES = ["mariadb-dump", "mysqldump"];
 const INSTALL_DB_CANDIDATES = ["mariadb-install-db", "mysql_install_db"];
+const UPGRADE_CANDIDATES = ["mariadb-upgrade", "mysql_upgrade"];
 
 const EXTRA_PATHS = [
   "/opt/homebrew/opt/mariadb/bin",
@@ -18,7 +19,7 @@ const EXTRA_PATHS = [
   "/usr/libexec",
 ];
 
-async function which(cmd: string): Promise<string | null> {
+function which(cmd: string): string | null {
   const fromPath = Bun.which(cmd);
   if (fromPath) return fromPath;
   for (const dir of EXTRA_PATHS) {
@@ -28,9 +29,9 @@ async function which(cmd: string): Promise<string | null> {
   return null;
 }
 
-async function findFirst(list: string[]): Promise<string | null> {
+function findFirst(list: string[]): string | null {
   for (const c of list) {
-    const found = await which(c);
+    const found = which(c);
     if (found) return found;
   }
   return null;
@@ -42,23 +43,28 @@ export interface MariaDbBinaries {
   client: string;
   dump: string;
   installDb: string;
+  upgrade: string | null;
 }
 
-export async function locateBinaries(): Promise<MariaDbBinaries> {
-  const server = env.mariadbBin ?? (await findFirst(SERVER_CANDIDATES));
+export function locateBinariesSync(): MariaDbBinaries {
+  const server = env.mariadbBin ?? findFirst(SERVER_CANDIDATES);
   if (!server) {
     throw new Error(
-      "MariaDB server binary not found. Install MariaDB (e.g. `brew install mariadb` on macOS, `apt install mariadb-server` on Linux) or set KILNDB_MARIADB_BIN.",
+      "MariaDB server binary not found. Install MariaDB (e.g. `brew install mariadb` on macOS, `apt install mariadb-server` on Linux) or set LAMBDATA_MARIADB_BIN.",
     );
   }
-  const admin = await findFirst(ADMIN_CANDIDATES);
-  const client = await findFirst(CLIENT_CANDIDATES);
-  const dump = await findFirst(DUMP_CANDIDATES);
-  const installDb = await findFirst(INSTALL_DB_CANDIDATES);
+  const admin = findFirst(ADMIN_CANDIDATES);
+  const client = findFirst(CLIENT_CANDIDATES);
+  const dump = findFirst(DUMP_CANDIDATES);
+  const installDb = findFirst(INSTALL_DB_CANDIDATES);
   if (!admin || !client || !dump || !installDb) {
     throw new Error(
       "MariaDB tooling incomplete (need mysqladmin/mysql/mysqldump/mariadb-install-db). Install full MariaDB package.",
     );
   }
-  return { server, admin, client, dump, installDb };
+  return { server, admin, client, dump, installDb, upgrade: findFirst(UPGRADE_CANDIDATES) };
+}
+
+export async function locateBinaries(): Promise<MariaDbBinaries> {
+  return locateBinariesSync();
 }

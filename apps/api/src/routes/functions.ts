@@ -1,9 +1,12 @@
-import { Hono } from "hono";
+import { Hono, type MiddlewareHandler } from "hono";
 import { HTTPException } from "hono/http-exception";
+import { z } from "zod";
 import { requireAuth, requireRole, type AuthVariables } from "../auth/middleware";
 import { audit, edgeFunctions, functionInvocations, functionSecrets } from "../db/queries";
 import { encryptSecret } from "../util/crypto";
+import { parseJson, parseQuery } from "../util/validate";
 import {
+  MAX_SOURCE_CHARS,
   createFunction,
   deleteFunction,
   getFunctionDefinition,
@@ -16,62 +19,85 @@ import {
 
 export const functionsRoute = new Hono<{ Variables: AuthVariables }>();
 
+const createSchema = z.object({
+  name: z.string().trim().min(1, "name required").max(63),
+  verifyJwt: z.boolean().optional(),
+});
+
+const patchSchema = z.object({ verifyJwt: z.boolean().optional() });
+
+const sourceSchema = z.object({
+  source: z.string({ error: "source required" }).max(MAX_SOURCE_CHARS, "function source exceeds 512 KB"),
+});
+
+const secretSchema = z.object({
+  name: z.string().trim().min(1, "name required"),
+  value: z.string().min(1, "secret value required").max(65_536),
+});
+
+const logsQuery = z.object({
+  limit: z.coerce.number().int().catch(50).optional(),
+});
+
+const adminOnly = requireRole("admin");
+
+function adminOnlyRead(message: string): MiddlewareHandler<{ Variables: AuthVariables }> {
+  return async (c, next) => {
+    if (c.get("user").role !== "admin") throw new HTTPException(403, { message });
+    await next();
+  };
+}
+
 functionsRoute.use("*", requireAuth);
 
 functionsRoute.get("/", async (c) => {
   return c.json({ functions: await listFunctionDefinitions() });
 });
 
-functionsRoute.post("/", async (c) => {
+functionsRoute.post("/", adminOnly, async (c) => {
   const user = c.get("user");
-  if (user.role === "viewer") throw new HTTPException(403, { message: "read-only role" });
-  const body = (await c.req.json()) as { name?: string; verifyJwt?: boolean };
-  const fn = await fromUserInputAsync(() =>
-    createFunction({
-      name: body.name ?? "",
-      verifyJwt: body.verifyJwt !== false,
-      createdByUserId: user.id,
-    }),
-  );
+  const body = await parseJson(c, createSchema);
+  const fn = await createFunction({
+    name: body.name,
+    verifyJwt: body.verifyJwt !== false,
+    createdByUserId: user.id,
+  });
   audit.log(user.id, "function.create", fn.name, { verifyJwt: fn.verifyJwt });
   return c.json({ function: fn });
 });
 
-functionsRoute.get("/secrets", requireRole("admin"), (c) => {
+functionsRoute.get("/secrets", adminOnly, (c) => {
   return c.json({ secrets: functionSecrets.list() });
 });
 
-functionsRoute.post("/secrets", requireRole("admin"), async (c) => {
+functionsRoute.post("/secrets", adminOnly, async (c) => {
   const user = c.get("user");
-  const body = (await c.req.json()) as { name?: string; value?: string };
-  const name = fromUserInput(() => normalizeSecretName(body.name ?? ""));
-  if (!body.value) throw new HTTPException(400, { message: "secret value required" });
+  const body = await parseJson(c, secretSchema);
+  const name = normalizeSecretName(body.name);
   functionSecrets.upsert({ name, valueEnc: await encryptSecret(body.value) });
   audit.log(user.id, "function.secret.upsert", name, {});
   return c.json({ secret: functionSecrets.list().find((s) => s.name === name) });
 });
 
-functionsRoute.delete("/secrets/:name", requireRole("admin"), (c) => {
+functionsRoute.delete("/secrets/:name", adminOnly, (c) => {
   const user = c.get("user");
-  const name = fromUserInput(() => normalizeSecretName(c.req.param("name")));
+  const name = normalizeSecretName(c.req.param("name"));
   functionSecrets.delete(name);
   audit.log(user.id, "function.secret.delete", name, {});
   return c.json({ ok: true });
 });
 
 functionsRoute.get("/:name", async (c) => {
-  const fn = await fromUserInputAsync(() => getFunctionDefinition(c.req.param("name")));
-  return c.json({ function: fn });
+  return c.json({ function: await getFunctionDefinition(c.req.param("name")) });
 });
 
-functionsRoute.patch("/:name", async (c) => {
+functionsRoute.patch("/:name", adminOnly, async (c) => {
   const user = c.get("user");
-  if (user.role === "viewer") throw new HTTPException(403, { message: "read-only role" });
-  const name = fromUserInput(() => normalizeFunctionName(c.req.param("name")));
-  const existing = await fromUserInputAsync(() => getFunctionDefinition(name));
-  const body = (await c.req.json()) as { verifyJwt?: boolean };
+  const name = normalizeFunctionName(c.req.param("name"));
+  const existing = await getFunctionDefinition(name);
+  const body = await parseJson(c, patchSchema);
   if (body.verifyJwt !== undefined) {
-    edgeFunctions.upsert({ name, verifyJwt: !!body.verifyJwt, createdByUserId: user.id });
+    edgeFunctions.upsert({ name, verifyJwt: body.verifyJwt, createdByUserId: user.id });
   }
   const fn = await getFunctionDefinition(name);
   audit.log(user.id, "function.update", name, {
@@ -81,58 +107,30 @@ functionsRoute.patch("/:name", async (c) => {
   return c.json({ function: fn });
 });
 
-functionsRoute.delete("/:name", async (c) => {
+functionsRoute.delete("/:name", adminOnly, async (c) => {
   const user = c.get("user");
-  if (user.role === "viewer") throw new HTTPException(403, { message: "read-only role" });
-  const name = fromUserInput(() => normalizeFunctionName(c.req.param("name")));
+  const name = normalizeFunctionName(c.req.param("name"));
   await deleteFunction(name);
   audit.log(user.id, "function.delete", name, {});
   return c.json({ ok: true });
 });
 
-functionsRoute.get("/:name/source", async (c) => {
-  const name = fromUserInput(() => normalizeFunctionName(c.req.param("name")));
-  await fromUserInputAsync(() => getFunctionDefinition(name));
+functionsRoute.get("/:name/source", adminOnlyRead("Only admins can read a function's source, because it often holds keys and other secrets."), async (c) => {
+  const name = normalizeFunctionName(c.req.param("name"));
   return c.json({ source: await readFunctionSource(name) });
 });
 
-functionsRoute.put("/:name/source", async (c) => {
+functionsRoute.put("/:name/source", adminOnly, async (c) => {
   const user = c.get("user");
-  if (user.role === "viewer") throw new HTTPException(403, { message: "read-only role" });
-  const name = fromUserInput(() => normalizeFunctionName(c.req.param("name")));
-  const body = (await c.req.json()) as { source?: string };
-  if (typeof body.source !== "string") {
-    throw new HTTPException(400, { message: "source required" });
-  }
-  const fn = await fromUserInputAsync(() => writeFunctionSource(name, body.source!));
-  audit.log(user.id, "function.source.update", name, { bytes: body.source.length });
+  const name = normalizeFunctionName(c.req.param("name"));
+  const { source } = await parseJson(c, sourceSchema);
+  const fn = await writeFunctionSource(name, source);
+  audit.log(user.id, "function.source.update", name, { bytes: source.length });
   return c.json({ function: fn });
 });
 
-functionsRoute.get("/:name/logs", (c) => {
-  const name = fromUserInput(() => normalizeFunctionName(c.req.param("name")));
-  const limit = Math.min(200, Math.max(1, Number(c.req.query("limit") ?? "50") || 50));
-  return c.json({ invocations: functionInvocations.list(name, limit) });
+functionsRoute.get("/:name/logs", adminOnlyRead("Only admins can read a function's invocation logs, because they often hold keys and other secrets."), (c) => {
+  const name = normalizeFunctionName(c.req.param("name"));
+  const { limit } = parseQuery(c, logsQuery);
+  return c.json({ invocations: functionInvocations.list(name, Math.min(200, Math.max(1, limit || 50))) });
 });
-
-function fromUserInput<T>(fn: () => T): T {
-  try {
-    return fn();
-  } catch (err) {
-    throw inputException(err);
-  }
-}
-
-async function fromUserInputAsync<T>(fn: () => Promise<T>): Promise<T> {
-  try {
-    return await fn();
-  } catch (err) {
-    throw inputException(err);
-  }
-}
-
-function inputException(err: unknown): HTTPException {
-  const message = err instanceof Error ? err.message : String(err);
-  const status = message.includes("not found") ? 404 : message.includes("already exists") ? 409 : 400;
-  return new HTTPException(status, { message });
-}

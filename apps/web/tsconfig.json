@@ -4,8 +4,8 @@
     "outDir": "dist",
     "types": ["vite/client"],
     "paths": {
-      "@kilndb/shared": ["../../packages/shared/src/index.ts"],
-      "@kilndb/shared/*": ["../../packages/shared/src/*"],
+      "@lambdata/shared": ["../../packages/shared/src/index.ts"],
+      "@lambdata/shared/*": ["../../packages/shared/src/*"],
       "@/*": ["./src/*"]
     },
     "noEmit": true

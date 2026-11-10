@@ -1,19 +1,31 @@
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
-import type { SyncSourceKind } from "@kilndb/shared";
+import { z } from "zod";
 import { audit, databases, syncJobs } from "../db/queries";
 import { requireAuth, requireDbAccess, type AuthVariables } from "../auth/middleware";
 import { encryptSecret } from "../util/crypto";
-import { runSyncJob } from "../workers/sync";
 import { newId } from "../util/id";
+import { parseJson } from "../util/validate";
+import { jobAcceptedResponse } from "../jobs";
+import { startSyncJob, syncSourceProblem } from "../workers/sync";
 
 export const syncRoute = new Hono<{ Variables: AuthVariables }>();
 
 syncRoute.use("*", requireAuth);
 
+const upsertBody = z.object({
+  sourceKind: z.enum(["mysql", "postgres"]),
+  sourceHost: z.string().trim().min(1).max(255),
+  sourcePort: z.coerce.number().int().min(1).max(65535),
+  sourceUser: z.string().min(1).max(128),
+  sourcePassword: z.string().max(1024).optional(),
+  sourceDatabase: z.string().min(1).max(64),
+  intervalSeconds: z.coerce.number().int().min(1).max(31_536_000).optional(),
+  enabled: z.boolean().optional(),
+});
+
 syncRoute.get("/:id/sync", requireDbAccess("id", "read"), (c) => {
-  const job = syncJobs.byDatabaseId(c.req.param("id"));
-  return c.json({ sync: job });
+  return c.json({ sync: syncJobs.byDatabaseId(c.req.param("id")) });
 });
 
 syncRoute.put("/:id/sync", requireDbAccess("id", "write"), async (c) => {
@@ -23,19 +35,9 @@ syncRoute.put("/:id/sync", requireDbAccess("id", "write"), async (c) => {
   if (dbRow.kind !== "mirror") {
     throw new HTTPException(400, { message: "sync only valid for mirror databases" });
   }
-  const body = (await c.req.json()) as {
-    sourceKind?: SyncSourceKind;
-    sourceHost?: string;
-    sourcePort?: number;
-    sourceUser?: string;
-    sourcePassword?: string;
-    sourceDatabase?: string;
-    intervalSeconds?: number;
-    enabled?: boolean;
-  };
-  if (!body.sourceKind || !body.sourceHost || !body.sourcePort || !body.sourceUser || !body.sourceDatabase) {
-    throw new HTTPException(400, { message: "missing required sync fields" });
-  }
+  const body = await parseJson(c, upsertBody);
+  const problem = syncSourceProblem(body);
+  if (problem) throw new HTTPException(400, { message: problem });
   const existing = syncJobs.byDatabaseId(id);
   let passwordEnc: string;
   if (body.sourcePassword) {
@@ -57,17 +59,17 @@ syncRoute.put("/:id/sync", requireDbAccess("id", "write"), async (c) => {
     intervalSeconds: Math.max(60, body.intervalSeconds ?? 3600),
     enabled: body.enabled !== false,
   });
-  audit.log(c.get("user").id, "sync.upsert", id, { host: body.sourceHost });
+  audit.log(c.get("user").id, "sync.upsert", id, { host: body.sourceHost, database: body.sourceDatabase });
   return c.json({ sync: syncJobs.byDatabaseId(id) });
 });
 
-syncRoute.post("/:id/sync/run", requireDbAccess("id", "write"), async (c) => {
+syncRoute.post("/:id/sync/run", requireDbAccess("id", "write"), (c) => {
   const id = c.req.param("id");
-  const job = syncJobs.byDatabaseId(id);
-  if (!job) throw new HTTPException(404, { message: "no sync configured" });
-  const result = await runSyncJob(id);
-  audit.log(c.get("user").id, "sync.run", id, { status: result.status });
-  return c.json(result);
+  if (!syncJobs.byDatabaseId(id)) throw new HTTPException(404, { message: "no sync configured" });
+  const user = c.get("user");
+  const job = startSyncJob(id, user.id);
+  audit.log(user.id, "sync.run", id, { jobId: job.id });
+  return jobAcceptedResponse(c, job);
 });
 
 syncRoute.delete("/:id/sync", requireDbAccess("id", "write"), (c) => {

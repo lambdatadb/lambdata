@@ -1,17 +1,19 @@
 {
-  "name": "@kilndb/api",
+  "name": "@lambdata/api",
   "version": "0.0.0",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "bun run --hot src/index.ts",
     "start": "bun run src/index.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
   },
   "dependencies": {
-    "@kilndb/shared": "workspace:*",
+    "@lambdata/shared": "workspace:*",
     "hono": "^4.6.10",
-    "mysql2": "^3.11.4"
+    "mysql2": "^3.11.4",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "bun-types": "latest"

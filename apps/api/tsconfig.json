@@ -4,9 +4,9 @@
     "outDir": "dist",
     "noEmit": true,
     "paths": {
-      "@kilndb/shared": ["../../packages/shared/src/index.ts"],
-      "@kilndb/shared/*": ["../../packages/shared/src/*"]
+      "@lambdata/shared": ["../../packages/shared/src/index.ts"],
+      "@lambdata/shared/*": ["../../packages/shared/src/*"]
     }
   },
-  "include": ["src/**/*", "../../packages/shared/src/**/*"]
+  "include": ["src/**/*", "test/**/*", "../../packages/shared/src/**/*"]
 }

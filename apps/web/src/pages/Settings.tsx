@@ -1,481 +1,241 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
-import type {
-  AppSettings,
-  ColorTheme,
-  DataDirMigrationResponse,
-  ExperienceLevel,
-  PathValidationResponse,
-  VitalsChartStyle,
-} from "@kilndb/shared";
-import { api, ApiError } from "../lib/api";
-import { useAuth } from "../lib/auth";
+import { Link } from "react-router-dom";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import type { ExperienceLevel, User } from "@lambdata/shared";
+import { FolderInput, RotateCcw } from "lucide-react";
+import { api, errorMessage } from "../lib/api";
+import { roleLabel, useAuth } from "../lib/auth";
 import { formatBytes } from "../lib/format";
-import { applyColorTheme } from "../lib/theme";
 import { PageHeader } from "../components/layout/PageShell";
-import { Card, CardTitle } from "../components/ui/Card";
-import { Button } from "../components/ui/Button";
-import { Field, Input } from "../components/ui/Input";
-import { Select } from "../components/ui/Select";
-import { Switch } from "../components/ui/Switch";
-import { Dialog } from "../components/ui/Dialog";
-import { Icon } from "../components/ui/Icon";
-import { useToast } from "../components/ui/Toast";
-import { DataDirPicker } from "../components/storage/DataDirPicker";
-import { cn } from "../components/ui/cn";
-
-const COLOR_THEMES: {
-  value: ColorTheme;
-  label: string;
-  description: string;
-}[] = [
-  {
-    value: "ember",
-    label: "Ember",
-    description: "Warm charcoal and kiln orange",
-  },
-  {
-    value: "tide",
-    label: "Tide",
-    description: "Deep navy and electric cyan",
-  },
-  {
-    value: "grove",
-    label: "Grove",
-    description: "Forest green and burnished gold",
-  },
-  {
-    value: "orchid",
-    label: "Orchid",
-    description: "Ink purple and soft magenta",
-  },
-];
-
-const CHART_STYLES: {
-  value: VitalsChartStyle;
-  label: string;
-  description: string;
-}[] = [
-  {
-    value: "area",
-    label: "Area",
-    description: "Smooth stacked history with animated fills",
-  },
-  {
-    value: "capsules",
-    label: "Capsules",
-    description: "Discrete rounded snapshots with animated stacks",
-  },
-];
+import {
+  Alert,
+  Button,
+  Card,
+  DescriptionItem,
+  DescriptionList,
+  Field,
+  SegmentedControl,
+  Skeleton,
+  Switch,
+  useToast,
+} from "../components/ui";
+import { AppearanceCard, useUpdateMe } from "../components/settings/AppearanceCard";
+import { PasswordForm } from "../components/settings/PasswordForm";
+import { SettingsSection } from "../components/settings/SettingsSection";
+import { SignOutEverywhereCard } from "../components/settings/SignOutEverywhereCard";
+import { StorageMigrationDialog } from "../components/settings/StorageMigrationDialog";
+import { CheckpointLimitsCard } from "../components/settings/CheckpointLimitsCard";
+import { queryKeys, useAppSettings } from "../lib/queries";
 
 export function Settings() {
-  const { user, refetch } = useAuth();
+  const { user } = useAuth();
   const qc = useQueryClient();
   const toast = useToast();
-  const { data } = useQuery({
-    queryKey: ["settings"],
-    queryFn: () => api.get<AppSettings>("/settings"),
-  });
-  const [pw, setPw] = useState("");
-  const [level, setLevel] = useState<ExperienceLevel>(user?.experienceLevel ?? "advanced");
-  const [storageOpen, setStorageOpen] = useState(false);
+  const [moveOpen, setMoveOpen] = useState(false);
 
-  const updateMe = useMutation({
-    mutationFn: (body: Record<string, unknown>) => api.patch(`/users/${user!.id}`, body),
-    onSuccess: async () => {
-      await refetch();
-      qc.invalidateQueries();
-      toast.show("Updated", "success");
-    },
-    onError: (e) => toast.show(e instanceof ApiError ? e.message : "update failed", "error"),
-  });
+  const settingsQuery = useAppSettings();
+  const settings = settingsQuery.data;
+
   const updateSettings = useMutation({
-    mutationFn: (body: Record<string, boolean>) => api.patch("/settings", body),
-    onSuccess: async () => {
-      await qc.invalidateQueries({ queryKey: ["settings"] });
-      await qc.invalidateQueries({ queryKey: ["dashboard", "summary"] });
-      toast.show("Dashboard display updated", "success");
+    mutationFn: (body: { dashboardShowAddresses: boolean }) => api.patch("/settings", body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.settings });
+      qc.invalidateQueries({ queryKey: queryKeys.dashboardSummary });
     },
-    onError: (e) => toast.show(e instanceof ApiError ? e.message : "update failed", "error"),
   });
 
   if (!user) return null;
-
-  const changeTheme = (theme: ColorTheme) => {
-    const previous = user.colorTheme;
-    applyColorTheme(theme, true);
-    updateMe.mutate(
-      { colorTheme: theme },
-      { onError: () => applyColorTheme(previous, true) },
-    );
-  };
+  const isAdmin = user.role === "admin";
 
   return (
     <>
-      <PageHeader title="Settings" subtitle="Tune your profile and the look of KilnDB." />
-      <div className="space-y-4">
-        <Card>
-          <CardTitle>Profile</CardTitle>
-          <div className="grid grid-cols-2 gap-4 mt-2">
-            <Field label="Email"><Input value={user.email} disabled /></Field>
-            <Field label="Display name"><Input value={user.displayName ?? ""} disabled /></Field>
-            <Field label="Role"><Input value={user.role} disabled /></Field>
-            <Field label="Experience level">
-              <Select value={level} onChange={(e) => setLevel(e.target.value as ExperienceLevel)}>
-                <option value="advanced">Advanced</option>
-                <option value="novice">Novice</option>
-              </Select>
-            </Field>
-          </div>
-          <div className="mt-3 flex justify-end">
-            <Button
-              size="sm"
-              disabled={level === user.experienceLevel}
-              loading={updateMe.isPending}
-              onClick={() => updateMe.mutate({ experienceLevel: level })}
-            >
-              Save
-            </Button>
-          </div>
-        </Card>
+      <PageHeader title="Settings" subtitle="Your account, how LambData looks, and where it keeps its data." />
+      <div className="pb-6">
+        <SettingsSection id="profile" title="Profile" description="Your sign-in and how much the console explains.">
+          <ProfileCard key={user.experienceLevel} user={user} />
+        </SettingsSection>
 
-        <Card>
-          <CardTitle>Change password</CardTitle>
-          <div className="grid grid-cols-2 gap-4 mt-2">
-            <Field label="New password" hint="At least 8 characters">
-              <Input type="password" value={pw} onChange={(e) => setPw(e.target.value)} />
-            </Field>
-          </div>
-          <div className="mt-3 flex justify-end">
-            <Button
-              size="sm"
-              disabled={pw.length < 8}
-              loading={updateMe.isPending}
-              onClick={() => {
-                updateMe.mutate({ password: pw });
-                setPw("");
-              }}
-            >
-              Update password
-            </Button>
-          </div>
-        </Card>
+        <SettingsSection
+          id="password"
+          title="Password"
+          description="You need your current password to set a new one. Changing it signs out your other sessions."
+        >
+          <PasswordForm user={user} />
+          <SignOutEverywhereCard />
+        </SettingsSection>
 
-        <Card>
-          <CardTitle>Display</CardTitle>
-          <div className="mt-4 space-y-5">
-            <div>
-              <div className="text-label font-medium text-text-muted">Color palette</div>
-              <p className="mt-0.5 text-micro text-text-subtle">
-                Changes surfaces, accents, charts, and interactive states across KilnDB.
-              </p>
-              <div className="mt-2.5 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
-                {COLOR_THEMES.map((theme) => {
-                  const selected = user.colorTheme === theme.value;
-                  return (
-                    <button
-                      key={theme.value}
-                      type="button"
-                      aria-pressed={selected}
-                      disabled={updateMe.isPending}
-                      onClick={() => changeTheme(theme.value)}
-                      className={cn(
-                        "preference-tile rounded-lg border p-3 text-left disabled:cursor-not-allowed disabled:opacity-60",
-                        selected
-                          ? "border-accent bg-accent/[0.06] shadow-card"
-                          : "border-border bg-bg-subtle/45 hover:border-border-strong hover:bg-bg-subtle",
-                      )}
-                    >
-                      <span
-                        className="flex items-center gap-1.5"
-                        data-palette-preview={theme.value}
-                        aria-hidden
-                      >
-                        {Array.from({ length: 3 }, (_, index) => (
-                          <span
-                            key={index}
-                            className={`palette-preview__swatch palette-preview__swatch--${index + 1} size-3 rounded-full ring-1 ring-white/10`}
-                          />
-                        ))}
-                      </span>
-                      <span className="mt-2 block text-body font-medium">{theme.label}</span>
-                      <span className="mt-0.5 block text-micro text-text-muted">{theme.description}</span>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
+        <SettingsSection id="appearance" title="Appearance" description="Saved to your account, so it follows you between browsers.">
+          <AppearanceCard user={user} />
+        </SettingsSection>
 
-            <div className="border-t border-border pt-4">
-              <div className="text-label font-medium text-text-muted">Cluster vitals visualization</div>
-              <p className="mt-0.5 text-micro text-text-subtle">
-                Choose how storage history is drawn on the dashboard.
-              </p>
-              <div className="mt-2.5 grid gap-2 sm:grid-cols-2">
-                {CHART_STYLES.map((style) => {
-                  const selected = user.vitalsChartStyle === style.value;
-                  return (
-                    <button
-                      key={style.value}
-                      type="button"
-                      aria-pressed={selected}
-                      disabled={updateMe.isPending}
-                      onClick={() => updateMe.mutate({ vitalsChartStyle: style.value })}
-                      className={cn(
-                        "preference-tile flex items-center gap-3 rounded-lg border p-3 text-left disabled:cursor-not-allowed disabled:opacity-60",
-                        selected
-                          ? "border-accent bg-accent/[0.06] shadow-card"
-                          : "border-border bg-bg-subtle/45 hover:border-border-strong hover:bg-bg-subtle",
-                      )}
-                    >
-                      <ChartStylePreview style={style.value} />
-                      <span>
-                        <span className="block text-body font-medium">{style.label}</span>
-                        <span className="mt-0.5 block text-micro text-text-muted">{style.description}</span>
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-
-            <div className="space-y-4 border-t border-border pt-4">
+        <SettingsSection id="dashboard" title="Dashboard" description="Shared by everyone who signs in to this instance.">
+          <Card>
+            {settingsQuery.isError ? (
+              <SettingsError onRetry={() => settingsQuery.refetch()} error={settingsQuery.error} />
+            ) : (
               <Switch
-                checked={user.dataViewEnabled}
-                onChange={(v) => updateMe.mutate({ dataViewEnabled: v })}
-                label="Show vitals strip on database overview"
-                description="A 24-hour size ribbon, writes/min heartbeat, and table/row/connection counts. Computed from periodic metadata polls — no row contents are read."
+                checked={settings?.dashboardShowAddresses ?? false}
+                disabled={!isAdmin || !settings || updateSettings.isPending}
+                onCheckedChange={(dashboardShowAddresses) =>
+                  updateSettings.mutate(
+                    { dashboardShowAddresses },
+                    {
+                      onSuccess: () =>
+                        toast.success(dashboardShowAddresses ? "Addresses shown on the dashboard" : "Addresses hidden from the dashboard"),
+                      onError: (e) => toast.error(errorMessage(e, "Could not save the setting")),
+                    },
+                  )
+                }
+                label="Show connection addresses"
+                description={
+                  isAdmin
+                    ? "Shows the public database endpoint under the dashboard title, and the tailnet endpoint while Tailscale is connected."
+                    : "Shows the database endpoints under the dashboard title. Only admins can change this."
+                }
               />
-              <Switch
-                checked={data?.dashboardShowAddresses ?? true}
-                onChange={(v) => updateSettings.mutate({ dashboard_show_addresses: v })}
-                disabled={user.role !== "admin" || !data || updateSettings.isPending}
-                label="Show connection addresses on dashboard"
-                description="Show the public database endpoint and, while Tailscale is connected, the Tailnet endpoint beneath Overview."
-              />
-            </div>
-          </div>
-        </Card>
-
-        <Card>
-          <div className="flex items-start justify-between gap-3">
-            <div>
-              <CardTitle>Storage</CardTitle>
-              <p className="mt-1 text-body text-text-muted">
-                Where KilnDB keeps the MariaDB datadir, SQLite metadata, snapshots, and the master encryption key.
-              </p>
-            </div>
-            {user.role === "admin" && (
-              <Button size="sm" variant="secondary" onClick={() => setStorageOpen(true)}>
-                <Icon name="folder_open" size={14} />
-                Change…
-              </Button>
             )}
-          </div>
-          <dl className="mt-3 grid grid-cols-[10rem_1fr] gap-y-1.5 text-body">
-            <dt className="text-text-muted">Data directory</dt>
-            <dd className="font-mono break-all">{data?.dataDir ?? "—"}</dd>
-            <dt className="text-text-muted">Pointer config</dt>
-            <dd className="font-mono text-label break-all text-text-muted">{data?.pointerPath ?? "—"}</dd>
-            <dt className="text-text-muted">Free space</dt>
-            <dd className="font-mono">{data?.dataDirFreeBytes != null ? formatBytes(data.dataDirFreeBytes) : "—"}</dd>
-          </dl>
-        </Card>
+          </Card>
+        </SettingsSection>
 
-        <Card>
-          <CardTitle>System</CardTitle>
-          <dl className="grid grid-cols-2 gap-y-2 text-body">
-            <dt className="text-text-muted">MariaDB port</dt>
-            <dd className="font-mono">{data?.mariadbPort ?? "—"}</dd>
-            <dt className="text-text-muted">Setup</dt>
-            <dd>{data?.setupComplete ? "Complete" : "Incomplete"}</dd>
-            <dt className="text-text-muted">Tailscale</dt>
-            <dd>{data?.tailscaleEnabled ? "Enabled" : "Disabled"}</dd>
-          </dl>
-        </Card>
+        <SettingsSection
+          id="storage"
+          title="Storage"
+          description="Where LambData keeps the MariaDB data, its own metadata, checkpoints and the encryption key."
+        >
+          <Card>
+            {settingsQuery.isError ? (
+              <SettingsError onRetry={() => settingsQuery.refetch()} error={settingsQuery.error} />
+            ) : (
+              <div className="space-y-4">
+                <DescriptionList>
+                  <DescriptionItem term="Data directory" mono>
+                    {settings ? <span className="break-all">{settings.dataDir}</span> : <Skeleton className="ml-auto h-4 w-48" />}
+                  </DescriptionItem>
+                  <DescriptionItem term="Pointer file" mono>
+                    {settings ? (
+                      <span className="break-all text-text-muted">{settings.pointerPath}</span>
+                    ) : (
+                      <Skeleton className="ml-auto h-4 w-40" />
+                    )}
+                  </DescriptionItem>
+                  <DescriptionItem term="Free space" mono>
+                    {settings ? (settings.dataDirFreeBytes != null ? formatBytes(settings.dataDirFreeBytes) : "unknown") : <Skeleton className="ml-auto h-4 w-16" />}
+                  </DescriptionItem>
+                </DescriptionList>
+                {isAdmin && (
+                  <div className="flex justify-end border-t border-border pt-4">
+                    <Button variant="secondary" size="sm" disabled={!settings} onClick={() => setMoveOpen(true)}>
+                      <FolderInput aria-hidden /> Move data directory
+                    </Button>
+                  </div>
+                )}
+              </div>
+            )}
+          </Card>
+        </SettingsSection>
+
+        <SettingsSection
+          id="checkpoint-limits"
+          title="Checkpoint limits"
+          description="Ceilings on the automatic checkpoint policies database owners set, so history cannot fill the disk. Admins can set any policy."
+        >
+          <CheckpointLimitsCard limits={settings?.limits} isAdmin={isAdmin} />
+        </SettingsSection>
+
+        <SettingsSection id="system" title="System">
+          <Card>
+            {settingsQuery.isError ? (
+              <SettingsError onRetry={() => settingsQuery.refetch()} error={settingsQuery.error} />
+            ) : (
+              <DescriptionList>
+                <DescriptionItem term="MariaDB port" mono>
+                  {settings ? settings.mariadbPort : <Skeleton className="ml-auto h-4 w-12" />}
+                </DescriptionItem>
+                <DescriptionItem term="Setup">
+                  {settings ? (settings.setupComplete ? "Complete" : "Not finished") : <Skeleton className="ml-auto h-4 w-16" />}
+                </DescriptionItem>
+                <DescriptionItem term="Tailscale">
+                  {settings ? (
+                    <Link to="/network#tailscale" className="underline decoration-border-control underline-offset-4 hover:text-text">
+                      {settings.tailscaleEnabled ? "Enabled" : "Off"}
+                    </Link>
+                  ) : (
+                    <Skeleton className="ml-auto h-4 w-12" />
+                  )}
+                </DescriptionItem>
+              </DescriptionList>
+            )}
+          </Card>
+        </SettingsSection>
       </div>
-
-      <StorageMigrationDialog
-        open={storageOpen}
-        onClose={() => setStorageOpen(false)}
-        current={data?.dataDir ?? ""}
-      />
+      <StorageMigrationDialog open={moveOpen} onClose={() => setMoveOpen(false)} current={settings?.dataDir ?? ""} />
     </>
   );
 }
 
-function ChartStylePreview({ style }: { style: VitalsChartStyle }) {
+function ProfileCard({ user }: { user: User }) {
+  const toast = useToast();
+  const update = useUpdateMe(user);
+  const [level, setLevel] = useState<ExperienceLevel>(user.experienceLevel);
+
   return (
-    <svg
-      aria-hidden
-      viewBox="0 0 64 40"
-      className="h-10 w-16 shrink-0 overflow-visible rounded-md border border-border bg-bg p-1"
-    >
-      {style === "area" ? (
-        <>
-          <path
-            d="M1 34 C10 33 13 27 21 28 C30 30 33 17 42 19 C51 20 54 8 63 7 L63 39 L1 39 Z"
-            fill="rgb(var(--chart-1))"
-            fillOpacity="0.24"
-          />
-          <path
-            d="M1 34 C10 33 13 27 21 28 C30 30 33 17 42 19 C51 20 54 8 63 7"
-            fill="none"
-            stroke="rgb(var(--chart-1))"
-            strokeWidth="1.5"
-          />
-        </>
-      ) : (
-        Array.from({ length: 9 }, (_, index) => {
-          const height = 8 + index * 2.8 + (index % 3) * 3;
-          return (
-            <rect
-              key={index}
-              x={2 + index * 7}
-              y={38 - height}
-              width="4.5"
-              height={height}
-              rx="2.25"
-              fill="rgb(var(--chart-1))"
-              opacity={0.38 + index * 0.07}
-            />
-          );
-        })
-      )}
-    </svg>
+    <Card className="space-y-5">
+      <DescriptionList>
+        <DescriptionItem term="Email" mono>
+          {user.email}
+        </DescriptionItem>
+        <DescriptionItem term="Display name">{user.displayName || <span className="text-text-subtle">not set</span>}</DescriptionItem>
+        <DescriptionItem term="Role">{roleLabel(user.role)}</DescriptionItem>
+      </DescriptionList>
+      <Field
+        label="Interface"
+        id="experience-level"
+        hint={level === "novice" ? "Database terms come with plain-language explanations." : "Terse labels for people who know MariaDB."}
+        className="border-t border-border pt-4"
+      >
+        <SegmentedControl
+          id="experience-level"
+          aria-label="Interface"
+          className="w-fit"
+          value={level}
+          disabled={update.isPending}
+          onValueChange={(value) => {
+            const next = value as ExperienceLevel;
+            const previous = level;
+            setLevel(next);
+            update.mutate(
+              { experienceLevel: next },
+              {
+                onSuccess: () => toast.success(next === "novice" ? "Explanations turned on" : "Explanations turned off"),
+                onError: (e) => {
+                  setLevel(previous);
+                  toast.error(errorMessage(e, "Could not save the setting"));
+                },
+              },
+            );
+          }}
+          options={[
+            { value: "advanced", label: "Advanced" },
+            { value: "novice", label: "Novice" },
+          ]}
+        />
+      </Field>
+    </Card>
   );
 }
 
-function StorageMigrationDialog({
-  open,
-  onClose,
-  current,
-}: {
-  open: boolean;
-  onClose: () => void;
-  current: string;
-}) {
-  const toast = useToast();
-  const qc = useQueryClient();
-  const [path, setPath] = useState("");
-  const [validation, setValidation] = useState<PathValidationResponse | null>(null);
-  const [confirming, setConfirming] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState<DataDirMigrationResponse | null>(null);
-  const [err, setErr] = useState<string | null>(null);
-
-  const reset = () => {
-    setPath("");
-    setValidation(null);
-    setConfirming(false);
-    setResult(null);
-    setErr(null);
-  };
-
-  const close = () => {
-    if (busy) return;
-    reset();
-    onClose();
-  };
-
-  const submit = async () => {
-    setErr(null);
-    setBusy(true);
-    try {
-      const r = await api.post<DataDirMigrationResponse>("/settings/data-dir", { path });
-      setResult(r);
-      await qc.invalidateQueries({ queryKey: ["settings"] });
-      toast.show("Storage moved", "success");
-    } catch (e) {
-      setErr(e instanceof ApiError ? e.message : "migration failed");
-    } finally {
-      setBusy(false);
-    }
-  };
-
+function SettingsError({ error, onRetry }: { error: unknown; onRetry: () => void }) {
   return (
-    <Dialog
-      open={open}
-      onClose={close}
-      size="lg"
-      title="Move storage location"
-      description="KilnDB will stop MariaDB, copy all data, verify, swap the pointer, and restart. Other operations will be paused for the duration."
+    <Alert
+      variant="danger"
+      title="Could not load instance settings"
+      action={
+        <Button size="xs" variant="secondary" onClick={onRetry}>
+          <RotateCcw aria-hidden /> Retry
+        </Button>
+      }
     >
-      {result ? (
-        <div className="space-y-3">
-          <p className="text-body text-success flex items-center gap-1.5">
-            <Icon name="check_circle" size={14} />
-            Migration complete.
-          </p>
-          <dl className="text-body grid grid-cols-[8rem_1fr] gap-y-1">
-            <dt className="text-text-muted">From</dt>
-            <dd className="font-mono text-label break-all">{result.oldPath}</dd>
-            <dt className="text-text-muted">To</dt>
-            <dd className="font-mono text-label break-all">{result.newPath}</dd>
-            <dt className="text-text-muted">Copied</dt>
-            <dd className="font-mono">{formatBytes(result.bytesCopied)}</dd>
-            <dt className="text-text-muted">Duration</dt>
-            <dd className="font-mono">{(result.durationMs / 1000).toFixed(1)} s</dd>
-          </dl>
-          <div className="flex justify-end pt-2">
-            <Button onClick={close}>Done</Button>
-          </div>
-        </div>
-      ) : !confirming ? (
-        <div className="space-y-4">
-          <div className="text-body">
-            <span className="text-text-muted">Current:</span>{" "}
-            <span className="font-mono text-label break-all">{current}</span>
-          </div>
-          <DataDirPicker
-            value={path}
-            onChange={setPath}
-            onValidation={setValidation}
-            disabled={busy}
-            pickerPrompt="Select new KilnDB data directory"
-          />
-          {err && <p className="text-body text-danger">{err}</p>}
-          <div className="flex justify-between pt-2">
-            <Button variant="ghost" onClick={close}>Cancel</Button>
-            <Button disabled={!validation?.ok} onClick={() => setConfirming(true)}>
-              Continue
-              <Icon name="arrow_forward" size={14} />
-            </Button>
-          </div>
-        </div>
-      ) : (
-        <div className="space-y-4">
-          <div className="rounded-md border border-warn/40 bg-warn/10 p-3 text-body">
-            <div className="flex items-center gap-2 font-medium">
-              <Icon name="warning" size={14} className="text-warn" />
-              MariaDB will be stopped during the move.
-            </div>
-            <p className="mt-1 text-label text-text-muted">
-              Connected clients will be dropped. Sync jobs and snapshots are paused. The old directory is deleted only
-              after the new location starts cleanly.
-            </p>
-          </div>
-          <dl className="text-body grid grid-cols-[6rem_1fr] gap-y-1">
-            <dt className="text-text-muted">From</dt>
-            <dd className="font-mono text-label break-all">{current}</dd>
-            <dt className="text-text-muted">To</dt>
-            <dd className="font-mono text-label break-all">{validation?.resolvedPath ?? path}</dd>
-            {validation?.freeBytes != null && (
-              <>
-                <dt className="text-text-muted">Free at dest</dt>
-                <dd className="font-mono">{formatBytes(validation.freeBytes)}</dd>
-              </>
-            )}
-          </dl>
-          {err && <p className="text-body text-danger">{err}</p>}
-          <div className="flex justify-between pt-2">
-            <Button variant="ghost" onClick={() => setConfirming(false)} disabled={busy}>Back</Button>
-            <Button variant="danger" loading={busy} onClick={submit}>
-              Move storage
-            </Button>
-          </div>
-        </div>
-      )}
-    </Dialog>
+      {errorMessage(error, "The server did not answer.")}
+    </Alert>
   );
 }

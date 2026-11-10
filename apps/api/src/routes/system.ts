@@ -1,44 +1,61 @@
-import { Hono, type Context } from "hono";
+import { Hono, type MiddlewareHandler } from "hono";
+import { z } from "zod";
 import { HTTPException } from "hono/http-exception";
-import { getCookie } from "hono/cookie";
 import { existsSync } from "node:fs";
 import { dirname } from "node:path";
-import type { PathValidationResponse, PickFolderResponse } from "@kilndb/shared";
-import { settings, users, audit } from "../db/queries";
-import { COOKIE_NAME, verifyJwt } from "../auth/jwt";
-import { type AuthVariables, requireAuth } from "../auth/middleware";
+import type { PathValidationResponse, PickFolderResponse } from "@lambdata/shared";
+import { settings, audit } from "../db/queries";
+import {
+  BEFORE_SETUP_LOOPBACK_MESSAGE,
+  type AuthVariables,
+  isLoopbackRequest,
+  requireAuth,
+  requireRole,
+} from "../auth/middleware";
 import { validateDataDirPath } from "../util/dataDirMigration";
+import { parseJson, parseQuery } from "../util/validate";
+import { refuseToken } from "./setup";
 
 export const systemRoute = new Hono<{ Variables: AuthVariables }>();
 
-// These endpoints are usable both during initial setup (no auth yet) and from
-// the authenticated Settings page once setup is complete. Gate accordingly.
-async function gate(c: Context<{ Variables: AuthVariables }>): Promise<void> {
-  if (settings.get("setup_complete") !== "1") return;
-  const token = getCookie(c, COOKIE_NAME);
-  if (!token) throw new HTTPException(401, { message: "not authenticated" });
-  const claims = await verifyJwt(token);
-  if (!claims) throw new HTTPException(401, { message: "invalid session" });
-  const user = users.byId(claims.sub);
-  if (!user) throw new HTTPException(401, { message: "user not found" });
-  if (user.role !== "admin") throw new HTTPException(403, { message: "admin only" });
-}
+const requireAdmin = requireRole("admin");
 
-systemRoute.post("/pick-folder", async (c) => {
-  await gate(c);
+const loopbackBeforeSetupOrAdmin: MiddlewareHandler<{ Variables: AuthVariables }> = async (c, next) => {
+  if (settings.get("setup_complete") !== "1") {
+    if (!isLoopbackRequest(c)) throw new HTTPException(403, { message: BEFORE_SETUP_LOOPBACK_MESSAGE });
+    return next();
+  }
+  return requireAuth(c, async () => {
+    await requireAdmin(c, next);
+  });
+};
+
+const setupTokenBeforeSetupOrAdmin: MiddlewareHandler<{ Variables: AuthVariables }> = async (c, next) => {
+  if (settings.get("setup_complete") !== "1") return next();
+  return requireAuth(c, async () => {
+    await requireAdmin(c, next);
+  });
+};
+
+const pickFolderSchema = z.object({
+  prompt: z.string().max(200).optional(),
+  default: z.string().max(4096).optional(),
+});
+
+const validatePathSchema = z.object({
+  path: z.string({ error: "path required" }).min(1, "path required"),
+  setupToken: z.string().max(200, "setup token is too long").optional(),
+});
+
+systemRoute.post("/pick-folder", loopbackBeforeSetupOrAdmin, async (c) => {
   if (process.platform !== "darwin" || !Bun.which("osascript")) {
     const res: PickFolderResponse = { canceled: true, path: null, unsupported: true };
     return c.json(res);
   }
-  const body = (await c.req.json().catch(() => ({}))) as { prompt?: string; default?: string };
-  const promptText = body.prompt?.trim() || "Select KilnDB data directory";
+  const body = await parseJson(c, pickFolderSchema);
+  const promptText = body.prompt?.trim() || "Select LambData data directory";
   const defaultPath = body.default?.trim();
 
-  // osascript opens a native folder picker on the host running the API —
-  // appropriate for the "running on user's own Mac" use case.
-  // `default location` needs an existing folder, otherwise AppleScript fails
-  // with -1700 trying to coerce a non-existent POSIX file to an alias. Walk up
-  // to the nearest ancestor that actually exists.
   const anchor = defaultPath ? nearestExistingDir(defaultPath) : null;
   const script = anchor
     ? `POSIX path of (choose folder with prompt "${escapeForOsa(promptText)}" default location (POSIX file "${escapeForOsa(anchor)}"))`
@@ -59,10 +76,12 @@ systemRoute.post("/pick-folder", async (c) => {
   return c.json(res);
 });
 
-systemRoute.post("/validate-path", async (c) => {
-  await gate(c);
-  const body = (await c.req.json()) as { path?: string };
-  if (!body.path) throw new HTTPException(400, { message: "path required" });
+systemRoute.post("/validate-path", setupTokenBeforeSetupOrAdmin, async (c) => {
+  const body = await parseJson(c, validatePathSchema);
+  if (settings.get("setup_complete") !== "1") {
+    const refused = refuseToken(c, body.setupToken);
+    if (refused) return refused;
+  }
   const v = validateDataDirPath(body.path);
   const res: PathValidationResponse = {
     ok: v.ok,
@@ -76,8 +95,12 @@ systemRoute.post("/validate-path", async (c) => {
   return c.json(res);
 });
 
-systemRoute.get("/audit-logs", requireAuth, (c) => {
-  const limit = Number(c.req.query("limit") ?? "20");
+const auditQuerySchema = z.object({
+  limit: z.coerce.number().int().catch(20).transform((n) => Math.min(500, Math.max(1, n))).default(20),
+});
+
+systemRoute.get("/audit-logs", requireAuth, requireAdmin, (c) => {
+  const { limit } = parseQuery(c, auditQuerySchema);
   const logs = audit.list(limit);
   return c.json({ logs });
 });

@@ -1,17 +1,27 @@
-name: kilndb
+name: lambdata
 
 services:
-  kilndb:
+  lambdata:
     build: .
-    image: kilndb:latest
-    container_name: kilndb
+    image: lambdata:latest
+    container_name: lambdata
     restart: unless-stopped
+    # LambData stops MariaDB cleanly on shutdown, which can take longer than
+    # Docker's default 10 seconds on a busy server.
+    stop_grace_period: 45s
     ports:
       - "4317:4317"
     volumes:
-      - kilndb-data:/data
+      - lambdata-data:/data
     environment:
-      KILNDB_COOKIE_SECURE: "0"
+      LAMBDATA_COOKIE_SECURE: "0"
 
 volumes:
-  kilndb-data:
+  lambdata-data:
+    # This is the Docker volume name the KilnDB version of this file created
+    # (project "kilndb", volume "kilndb-data"). Keeping it means an existing
+    # install finds its data after the rename instead of starting empty with the
+    # setup wizard. Docker Compose prints a warning that the volume "was created
+    # for project kilndb"; that warning is expected. A new install simply gets a
+    # volume with this name.
+    name: kilndb_kilndb-data

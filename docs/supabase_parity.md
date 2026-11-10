@@ -1,6 +1,6 @@
-# Supabase Parity Plan
+# Supabase parity plan
 
-KilnDB is intentionally not a Supabase clone: it keeps the current self-hosted MariaDB provisioning, snapshots, mirror sync, Tailscale exposure, RBAC, audit log, and Bun-native single-repo deployment model. The parity goal is to bring over the high-value product surfaces users expect from Supabase while staying simple to self-host.
+LambData is intentionally not a Supabase clone: it keeps the current self-hosted MariaDB provisioning, checkpoints, mirror sync, network access controls, RBAC, audit log, and Bun-native single-repo deployment model. The parity goal is to bring over the high-value product surfaces users expect from Supabase while staying simple to self-host.
 
 ## Sources
 
@@ -14,13 +14,13 @@ KilnDB is intentionally not a Supabase clone: it keeps the current self-hosted M
 - Supabase self-hosting: <https://supabase.com/docs/guides/self-hosting>
 - Supabase self-hosted functions: <https://supabase.com/docs/guides/self-hosting/self-hosted-functions>
 
-## Current Coverage
+## Current coverage
 
-| Supabase-like area | KilnDB state |
+| Supabase-like area | LambData state |
 |---|---|
 | Database console | MariaDB provisioning, users, generated credentials, query console, metrics, table breakdowns |
 | Generated REST API | App Auth-protected CRUD endpoints over managed MariaDB tables with select/order/pagination/filter query params, method gates, and owner-column policies |
-| Backups | On-demand and scheduled snapshots with restore |
+| Backups | Commit-style checkpoints (manual and scheduled) with diff, download and rollback; databases created from SQLite files or SQL dumps |
 | Storage | Local filesystem buckets, object upload/open/delete, private/public read URLs, RBAC, audit logging |
 | Auth | App users, email/password signup/token endpoints, bearer JWTs, signup toggle, admin user management; console operator auth remains separate |
 | Realtime | App Auth-protected WebSocket channels, REST broadcast, presence sync, and Data API mutation events |
@@ -30,7 +30,7 @@ KilnDB is intentionally not a Supabase clone: it keeps the current self-hosted M
 | Logs/analytics | Audit log and database metrics only |
 | Self-hosting | Single Bun stack with local data directory and no Docker requirement |
 
-## Next Build Order
+## Next build order
 
 1. **Storage hardening**: object metadata search, folder UI, signed URLs, upload limits, S3-compatible API, resumable uploads, and optional external S3-compatible backend.
 2. **Auth hardening**: refresh tokens, password recovery, magic links, OAuth hooks, CAPTCHA, email/SMS delivery, MFA, and policy primitives.
@@ -40,6 +40,6 @@ KilnDB is intentionally not a Supabase clone: it keeps the current self-hosted M
 6. **Postgres compatibility track**: optional managed Postgres engine for RLS, pgvector, Vault-like secrets, and closer Supabase feature parity.
 7. **Operations parity**: logs explorer, alerting, backup policies, PITR-equivalent design where supported, branch/preview workflows, and multi-host management.
 
-## Self-Hosting Stance
+## Self-hosting stance
 
-Supabase's own self-hosting docs call out that self-hosted Supabase behaves like a single project and does not include some managed-platform features such as branching, managed backups/PITR, advanced metrics beyond logs, analytics and vector buckets, ETL, or the platform management API. KilnDB should be explicit when it chooses a self-host-first version of a feature rather than matching the managed Supabase platform one-for-one.
+Supabase's own self-hosting docs call out that self-hosted Supabase behaves like a single project and does not include some managed-platform features such as branching, managed backups/PITR, advanced metrics beyond logs, analytics and vector buckets, ETL, or the platform management API. LambData should be explicit when it chooses a self-host-first version of a feature rather than matching the managed Supabase platform one-for-one.

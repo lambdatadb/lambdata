@@ -1,5 +1,5 @@
 {
-  "name": "kilndb",
+  "name": "lambdata",
   "version": "0.1.0",
   "description": "Self-hosted MySQL and MariaDB control plane with a web console, Data API, Auth, Realtime, Functions, and Storage.",
   "private": true,
@@ -19,7 +19,8 @@
     "dev:web": "bun run --cwd apps/web dev",
     "build": "bun run --cwd apps/web build",
     "start": "bun run --cwd apps/api start",
-    "typecheck": "bun run --filter '*' typecheck"
+    "typecheck": "bun run --filter '*' typecheck",
+    "test": "bun test"
   },
   "devDependencies": {
     "puppeteer-core": "^25.0.2",

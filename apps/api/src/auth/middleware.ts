@@ -1,22 +1,16 @@
-import type { MiddlewareHandler } from "hono";
-import { getCookie } from "hono/cookie";
+import type { Context, MiddlewareHandler } from "hono";
 import { HTTPException } from "hono/http-exception";
-import type { Role, User } from "@kilndb/shared";
+import type { Role, User } from "@lambdata/shared";
 import { users, databases } from "../db/queries";
-import { COOKIE_NAME, verifyJwt } from "./jwt";
+import { isLocalRequest } from "../network/request";
+import { readSessionCookie, verifyJwt } from "./jwt";
 
 export interface AuthVariables {
   user: User;
 }
 
-export const requireAuth: MiddlewareHandler<{ Variables: AuthVariables }> = async (c, next) => {
-  const token = getCookie(c, COOKIE_NAME);
-  if (!token) throw new HTTPException(401, { message: "not authenticated" });
-  const claims = await verifyJwt(token);
-  if (!claims) throw new HTTPException(401, { message: "invalid session" });
-  const user = users.byId(claims.sub);
-  if (!user) throw new HTTPException(401, { message: "user not found" });
-  c.set("user", {
+export function toPublicUser(user: User & { passwordHash?: string }): User {
+  return {
     id: user.id,
     email: user.email,
     displayName: user.displayName,
@@ -27,7 +21,18 @@ export const requireAuth: MiddlewareHandler<{ Variables: AuthVariables }> = asyn
     vitalsChartStyle: user.vitalsChartStyle,
     createdAt: user.createdAt,
     lastLoginAt: user.lastLoginAt,
-  });
+  };
+}
+
+export const requireAuth: MiddlewareHandler<{ Variables: AuthVariables }> = async (c, next) => {
+  if (c.get("user")) return next();
+  const token = readSessionCookie(c);
+  if (!token) throw new HTTPException(401, { message: "not authenticated" });
+  const claims = await verifyJwt(token);
+  if (!claims) throw new HTTPException(401, { message: "invalid session" });
+  const user = users.byId(claims.sub);
+  if (!user) throw new HTTPException(401, { message: "user not found" });
+  c.set("user", toPublicUser(user));
   await next();
 };
 
@@ -68,3 +73,10 @@ export function requireDbAccess(
     return next();
   };
 }
+
+export function isLoopbackRequest(c: Context): boolean {
+  return isLocalRequest(c);
+}
+
+export const BEFORE_SETUP_LOOPBACK_MESSAGE =
+  "until first-run setup is complete this endpoint only answers requests made on the server itself (localhost)";

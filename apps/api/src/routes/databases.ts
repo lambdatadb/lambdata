@@ -1,32 +1,50 @@
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
-import type { DatabaseCredentials, DatabaseKind } from "@kilndb/shared";
-import { audit, databases, syncJobs } from "../db/queries";
+import { z } from "zod";
+import type { DatabaseCredentials } from "@lambdata/shared";
+import { audit, databases } from "../db/queries";
 import { requireAuth, requireDbAccess, type AuthVariables } from "../auth/middleware";
-import {
-  createDatabaseAndUser,
-  dropDatabaseAndUser,
-  rotatePassword,
-  updateAllowedHost,
-} from "../mariadb/manager";
+import { rotatePassword, updateAllowedHost } from "../mariadb/manager";
 import { decryptSecret, encryptSecret } from "../util/crypto";
-import {
-  deriveSchemaName,
-  generateMysqlUser,
-  generatePassword,
-} from "../util/credentials";
+import { generatePassword } from "../util/credentials";
 import { buildConnectionStrings } from "../util/connstr";
-import { newId } from "../util/id";
+import { isSafeHostPattern } from "../util/ident";
+import { parseJson } from "../util/validate";
 import { env } from "../env";
-import { tailscaleStatus } from "../tailscale/cli";
+import { connectionHost, deprovisionDatabase, provisionDatabase, publicDatabase } from "../databases/provision";
+import { runExclusive } from "../jobs";
 
 export const databasesRoute = new Hono<{ Variables: AuthVariables }>();
 
 databasesRoute.use("*", requireAuth);
 
+const hostPattern = z
+  .string()
+  .trim()
+  .min(1)
+  .max(255)
+  .refine(isSafeHostPattern, "must be a MariaDB host pattern such as % or 192.168.1.%");
+
+const createSchema = z.object({
+  displayName: z.string().trim().min(1, "displayName required").max(200),
+  kind: z.enum(["standard", "mirror"]).optional(),
+  connectionsFrom: z.union([hostPattern, z.literal("")]).optional(),
+  tailnetOnly: z.boolean().optional(),
+  versioned: z.boolean().optional(),
+  showInVitals: z.boolean().optional(),
+});
+
+const patchSchema = z.object({
+  displayName: z.string().trim().min(1).max(200).optional(),
+  connectionsFrom: hostPattern.optional(),
+  tailscaleExposed: z.boolean().optional(),
+  lanExposed: z.boolean().optional(),
+  versioned: z.boolean().optional(),
+  showInVitals: z.boolean().optional(),
+});
+
 databasesRoute.get("/", (c) => {
   const user = c.get("user");
-  // admin + viewer see all DBs (viewers read-only); db_owner only sees their own.
   const list = user.role === "db_owner" ? databases.listForUser(user.id) : databases.list();
   return c.json({ databases: list });
 });
@@ -36,117 +54,61 @@ databasesRoute.post("/", async (c) => {
   if (user.role === "viewer") {
     throw new HTTPException(403, { message: "viewers cannot create databases" });
   }
-  const body = (await c.req.json()) as {
-    displayName?: string;
-    kind?: DatabaseKind;
-    connectionsFrom?: string;
-    tailnetOnly?: boolean;
-  };
-  if (!body.displayName?.trim()) {
-    throw new HTTPException(400, { message: "displayName required" });
-  }
-  const kind: DatabaseKind = body.kind === "mirror" ? "mirror" : "standard";
-  const tailnetOnly = body.tailnetOnly === true;
-  const connectionsFrom = tailnetOnly
-    ? "100.%"
-    : (body.connectionsFrom?.trim() || "%");
-
-  const schemaBase = deriveSchemaName(body.displayName);
-  let schema = schemaBase;
-  let attempt = 0;
-  while (databases.byName(schema)) {
-    attempt++;
-    schema = `${schemaBase}_${attempt}`;
-    if (attempt > 100) throw new HTTPException(500, { message: "could not allocate schema name" });
-  }
-  const mysqlUser = generateMysqlUser(schema);
-  const password = generatePassword();
-
-  await createDatabaseAndUser({ schema, user: mysqlUser, password, connectionsFrom });
-
-  const id = newId("db");
-  databases.insert({
-    id,
-    name: schema,
-    displayName: body.displayName.trim(),
+  const body = await parseJson(c, createSchema);
+  const { database, credentials } = await provisionDatabase({
+    displayName: body.displayName,
+    kind: body.kind,
+    connectionsFrom: body.connectionsFrom || undefined,
+    tailnetOnly: body.tailnetOnly,
+    versioned: body.versioned,
+    showInVitals: body.showInVitals,
     ownerUserId: user.id,
-    kind,
-    mysqlUser,
-    mysqlPasswordEnc: await encryptSecret(password),
-    connectionsFrom,
-    tailscaleExposed: tailnetOnly,
-    lanExposed: !tailnetOnly,
   });
-  audit.log(user.id, "db.create", id, { name: schema, kind });
-
-  const ts = tailnetOnly ? await tailscaleStatus().catch(() => null) : null;
-  const host = tailnetOnly && ts?.tailnetIp ? ts.tailnetIp : env.mariadbBind;
-  const credentials: DatabaseCredentials = buildConnectionStrings({
-    host,
-    port: env.mariadbPort,
-    schema,
-    user: mysqlUser,
-    password,
-  });
-
-  const created = databases.byId(id);
-  return c.json({ database: created ? stripEnc(created) : null, credentials });
+  audit.log(user.id, "db.create", database.id, { name: database.name, kind: database.kind });
+  return c.json({ database, credentials });
 });
-
-function stripEnc<T extends { mysqlPasswordEnc?: string }>(row: T): Omit<T, "mysqlPasswordEnc"> {
-  const { mysqlPasswordEnc: _strip, ...rest } = row;
-  void _strip;
-  return rest;
-}
 
 databasesRoute.get("/:id", requireDbAccess("id", "read"), (c) => {
   const row = databases.byId(c.req.param("id"));
   if (!row) throw new HTTPException(404, { message: "not found" });
-  return c.json({ database: stripEnc(row) });
+  return c.json({ database: publicDatabase(row) });
 });
 
 databasesRoute.patch("/:id", requireDbAccess("id", "write"), async (c) => {
   const id = c.req.param("id");
   const existing = databases.byId(id);
   if (!existing) throw new HTTPException(404, { message: "not found" });
-  const body = (await c.req.json()) as {
-    displayName?: string;
-    connectionsFrom?: string;
-    tailscaleExposed?: boolean;
-    lanExposed?: boolean;
+  const body = await parseJson(c, patchSchema);
+  const warnings: string[] = [];
+  const hostChange = body.connectionsFrom !== undefined && body.connectionsFrom !== existing.connectionsFrom;
+  const apply = async () => {
+    const current = databases.byId(id) ?? existing;
+    if (body.connectionsFrom !== undefined && body.connectionsFrom !== current.connectionsFrom) {
+      const pw = await decryptSecret(current.mysqlPasswordEnc);
+      const moved = await updateAllowedHost({
+        user: current.mysqlUser,
+        oldHost: current.connectionsFrom,
+        newHost: body.connectionsFrom,
+        password: pw,
+        schema: current.name,
+        databaseId: id,
+      });
+      warnings.push(...moved.warnings);
+    }
+    databases.update(id, body);
   };
-  if (body.connectionsFrom !== undefined && body.connectionsFrom !== existing.connectionsFrom) {
-    const pw = await decryptSecret(existing.mysqlPasswordEnc);
-    await updateAllowedHost({
-      user: existing.mysqlUser,
-      oldHost: existing.connectionsFrom,
-      newHost: body.connectionsFrom,
-      password: pw,
-      schema: existing.name,
-    });
-  }
-  databases.update(id, {
-    displayName: body.displayName,
-    connectionsFrom: body.connectionsFrom,
-    tailscaleExposed: body.tailscaleExposed,
-    lanExposed: body.lanExposed,
-  });
-  audit.log(c.get("user").id, "db.update", id, body);
+  if (hostChange) await runExclusive(id, apply);
+  else await apply();
+  audit.log(c.get("user").id, "db.update", id, warnings.length > 0 ? { ...body, warnings } : body);
   const updated = databases.byId(id);
-  return c.json({ database: updated ? stripEnc(updated) : null });
+  return c.json({ database: updated ? publicDatabase(updated) : null, warnings });
 });
 
 databasesRoute.delete("/:id", requireDbAccess("id", "owner"), async (c) => {
   const id = c.req.param("id");
   const row = databases.byId(id);
   if (!row) throw new HTTPException(404, { message: "not found" });
-  syncJobs.deleteByDatabaseId(id);
-  await dropDatabaseAndUser({
-    schema: row.name,
-    user: row.mysqlUser,
-    connectionsFrom: row.connectionsFrom,
-  });
-  databases.delete(id);
+  await deprovisionDatabase(id);
   audit.log(c.get("user").id, "db.delete", id, { name: row.name });
   return c.json({ ok: true });
 });
@@ -164,7 +126,7 @@ databasesRoute.post("/:id/rotate-password", requireDbAccess("id", "write"), asyn
   databases.updatePassword(id, await encryptSecret(newPw));
   audit.log(c.get("user").id, "db.rotate-password", id, null);
   const credentials: DatabaseCredentials = buildConnectionStrings({
-    host: env.mariadbBind,
+    host: await connectionHost(row.tailscaleExposed && !row.lanExposed),
     port: env.mariadbPort,
     schema: row.name,
     user: row.mysqlUser,

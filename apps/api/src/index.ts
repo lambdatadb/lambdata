@@ -1,37 +1,51 @@
+import "./workers/metrics";
+import "./workers/sync";
+import "./checkpoints/scheduler";
+import "./imports/service";
+import "./network/service";
+import "./notifications/service";
+import "./databases/startup";
+import "./checkpoints/startup";
 import { migrate } from "./db/migrate";
 import { buildApp } from "./server";
 import { env } from "./env";
 import { startMariaDb, stopMariaDb } from "./mariadb/controller";
-import { startSyncScheduler, stopSyncScheduler } from "./workers/sync";
-import { startSnapshotScheduler, stopSnapshotScheduler } from "./workers/snapshots";
-import { startMetricsLoop, stopMetricsLoop } from "./workers/metrics";
+import { settleMariaDbWork } from "./mariadb/shutdown";
 import { readPointer } from "./util/pointer";
 import { settings } from "./db/queries";
 import { realtimeSocketDataFromRequest, realtimeWebSocketHandlers } from "./realtime/hub";
+import { guardUpgradeRequest } from "./network/guard";
+import { recoverInterruptedJobs } from "./jobs";
+import { runStartupTasksOnce, startServices, stopServices } from "./lifecycle";
+import { settleAppAuthUpgrade } from "./auth/appJwt";
+import { warmPasswordCheck } from "./auth/password";
+import { announceSetupToken } from "./auth/setupToken";
+
+const IDLE_TIMEOUT_SECONDS = 120;
+const MAX_REQUEST_BODY_BYTES = 64 * 1024 * 1024 * 1024;
 
 async function main(): Promise<void> {
   migrate();
-  console.log("[kilndb] sqlite migrated:", env.sqlitePath);
+  console.log("[lambdata] sqlite migrated:", env.sqlitePath);
+  settleAppAuthUpgrade();
+  recoverInterruptedJobs();
+  void warmPasswordCheck();
 
-  // Defer MariaDB start on a truly-first run: if no pointer config has been
-  // written AND setup hasn't been completed, the user hasn't picked a storage
-  // location yet. The setup wizard's storage step will write the pointer, copy
-  // any bootstrap state, and start MariaDB at the chosen location.
+  let mariadbUp = false;
   const storageConfigured = readPointer() !== null || settings.get("setup_complete") === "1";
   if (storageConfigured) {
     try {
       await startMariaDb();
+      mariadbUp = true;
     } catch (err) {
-      console.error("[kilndb] failed to start MariaDB:", err);
-      console.error("[kilndb] API will start anyway; install MariaDB and restart to enable database management.");
+      console.error("[lambdata] failed to start MariaDB:", err instanceof Error ? err.message : String(err));
+      console.error("[lambdata] API will start anyway; install MariaDB and restart to enable database management.");
     }
   } else {
-    console.log("[kilndb] storage not configured — MariaDB will start after the setup wizard's storage step");
+    console.log("[lambdata] storage not configured — MariaDB will start after the setup wizard's storage step");
   }
 
-  startMetricsLoop();
-  startSyncScheduler();
-  startSnapshotScheduler();
+  await startServices();
 
   const app = buildApp();
   const server = Bun.serve({
@@ -40,6 +54,8 @@ async function main(): Promise<void> {
     async fetch(req, server) {
       const url = new URL(req.url);
       if (url.pathname === "/api/realtime/v1/websocket") {
+        const blocked = await guardUpgradeRequest(req, server);
+        if (blocked) return blocked;
         const data = await realtimeSocketDataFromRequest(req);
         if (!data) {
           return Response.json({ error: "valid App Auth token required" }, { status: 401 });
@@ -50,15 +66,21 @@ async function main(): Promise<void> {
       return app.fetch(req, { server });
     },
     websocket: realtimeWebSocketHandlers,
-    idleTimeout: 60,
+    idleTimeout: IDLE_TIMEOUT_SECONDS,
+    maxRequestBodySize: MAX_REQUEST_BODY_BYTES,
   });
-  console.log(`[kilndb] api listening on http://${server.hostname}:${server.port}`);
+  console.log(`[lambdata] api listening on http://${server.hostname}:${server.port}`);
+  if (settings.get("setup_complete") !== "1") announceSetupToken();
 
+  if (mariadbUp) void runStartupTasksOnce();
+
+  let shuttingDown = false;
   const shutdown = async (): Promise<void> => {
-    console.log("[kilndb] shutting down");
-    stopMetricsLoop();
-    stopSyncScheduler();
-    stopSnapshotScheduler();
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log("[lambdata] shutting down");
+    await settleMariaDbWork();
+    await stopServices();
     server.stop();
     await stopMariaDb().catch(() => {});
     process.exit(0);
@@ -68,6 +90,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-  console.error("[kilndb] fatal:", err);
+  console.error("[lambdata] fatal:", err);
   process.exit(1);
 });

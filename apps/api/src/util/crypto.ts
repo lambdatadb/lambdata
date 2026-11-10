@@ -3,14 +3,36 @@ import { env } from "../env";
 
 let cachedKey: CryptoKey | null = null;
 
-function freshBytes(n: number): Uint8Array<ArrayBuffer> {
+export function freshBytes(n: number): Uint8Array<ArrayBuffer> {
   return new Uint8Array(new ArrayBuffer(n));
 }
 
-function copyToFresh(src: Uint8Array): Uint8Array<ArrayBuffer> {
+export function copyToFresh(src: Uint8Array): Uint8Array<ArrayBuffer> {
   const out = freshBytes(src.byteLength);
   out.set(src);
   return out;
+}
+
+export function toBase64(bytes: Uint8Array): string {
+  let bin = "";
+  for (const b of bytes) bin += String.fromCharCode(b);
+  return btoa(bin);
+}
+
+export function fromBase64(s: string): Uint8Array<ArrayBuffer> {
+  const bin = atob(s);
+  const out = freshBytes(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+export function base64UrlEncode(bytes: Uint8Array): string {
+  return toBase64(bytes).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
+}
+
+export function base64UrlDecode(s: string): Uint8Array<ArrayBuffer> {
+  const pad = (4 - (s.length % 4)) % 4;
+  return fromBase64((s + "=".repeat(pad)).replaceAll("-", "+").replaceAll("_", "/"));
 }
 
 async function getKey(): Promise<CryptoKey> {
@@ -33,9 +55,7 @@ export async function encryptSecret(plain: string): Promise<string> {
   const iv = freshBytes(12);
   crypto.getRandomValues(iv);
   const ptBytes = copyToFresh(new TextEncoder().encode(plain));
-  const ct = new Uint8Array(
-    await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, ptBytes),
-  );
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, ptBytes));
   const out = freshBytes(iv.length + ct.length);
   out.set(iv, 0);
   out.set(ct, iv.length);
@@ -49,17 +69,4 @@ export async function decryptSecret(enc: string): Promise<string> {
   const ct = copyToFresh(buf.slice(12));
   const pt = new Uint8Array(await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, ct));
   return new TextDecoder().decode(pt);
-}
-
-function toBase64(b: Uint8Array): string {
-  let bin = "";
-  for (const v of b) bin += String.fromCharCode(v);
-  return btoa(bin);
-}
-
-function fromBase64(s: string): Uint8Array<ArrayBuffer> {
-  const bin = atob(s);
-  const out = freshBytes(bin.length);
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-  return out;
 }
