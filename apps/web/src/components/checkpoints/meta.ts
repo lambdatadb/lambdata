@@ -11,7 +11,7 @@ export function isAutomatic(trigger: CheckpointTrigger): boolean {
 const TRIGGERS: Record<CheckpointTrigger, { label: string; variant: NonNullable<BadgeProps["variant"]>; hint: string }> = {
   manual: { label: "manual", variant: "outline", hint: "Created by hand" },
   scheduled: { label: "auto", variant: "muted", hint: "Automatic checkpoint from the schedule" },
-  sync: { label: "sync", variant: "info", hint: "Recorded after a mirror sync changed data" },
+  sync: { label: "sync", variant: "info", hint: "Automatic checkpoint taken right after a sync" },
   "pre-sync": { label: "pre-sync", variant: "muted", hint: "Saved before a sync because the mirror had local changes" },
   "pre-restore": { label: "safety", variant: "warn", hint: "Saved automatically before a rollback replaced the data" },
   "pre-import": { label: "pre-import", variant: "muted", hint: "Saved automatically before an import" },

@@ -5,6 +5,7 @@ import type {
   CheckpointPolicy,
   CheckpointStorageStats,
   CheckpointTrigger,
+  ManualSyncCheckpointMode,
   UnconvertedSnapshot,
 } from "@lambdata/shared";
 import { db } from "../client";
@@ -52,13 +53,18 @@ export const AUTOMATIC_TRIGGERS: readonly CheckpointTrigger[] = [
   "pre-import",
 ];
 
-export type RetentionGroup = "scheduled" | "sync" | "safety";
+export type RetentionGroup = "automatic" | "safety";
 
 export const RETENTION_GROUPS: Record<RetentionGroup, readonly CheckpointTrigger[]> = {
-  scheduled: ["scheduled"],
-  sync: ["sync"],
+  automatic: ["scheduled", "sync"],
   safety: ["pre-sync", "pre-restore", "pre-import"],
 };
+
+export const MANUAL_SYNC_CHECKPOINT_MODES: readonly ManualSyncCheckpointMode[] = ["ask", "always", "never"];
+
+function manualModeOf(raw: unknown): ManualSyncCheckpointMode {
+  return MANUAL_SYNC_CHECKPOINT_MODES.includes(raw as ManualSyncCheckpointMode) ? (raw as ManualSyncCheckpointMode) : "ask";
+}
 
 export function retentionGroupOf(trigger: CheckpointTrigger): RetentionGroup | null {
   for (const [group, triggers] of Object.entries(RETENTION_GROUPS) as [RetentionGroup, readonly CheckpointTrigger[]][]) {
@@ -71,6 +77,7 @@ export const DEFAULT_POLICY: Omit<CheckpointPolicy, "versioned"> = {
   autoIntervalHours: 24,
   autoRetention: 7,
   checkpointOnSync: true,
+  manualSyncCheckpoint: "ask",
 };
 
 type CheckpointRow = {
@@ -442,22 +449,25 @@ export const checkpoints = {
   },
   policy(databaseId: string): Omit<CheckpointPolicy, "versioned"> {
     const r = db
-      .query("SELECT auto_interval_hours, auto_retention, checkpoint_on_sync FROM checkpoint_policies WHERE database_id = ?")
-      .get(databaseId) as { auto_interval_hours: number; auto_retention: number; checkpoint_on_sync: number } | null;
+      .query("SELECT auto_interval_hours, auto_retention, checkpoint_on_sync, manual_sync_checkpoint FROM checkpoint_policies WHERE database_id = ?")
+      .get(databaseId) as { auto_interval_hours: number; auto_retention: number; checkpoint_on_sync: number; manual_sync_checkpoint: string | null } | null;
     if (!r) return { ...DEFAULT_POLICY };
     return {
       autoIntervalHours: Number(r.auto_interval_hours),
       autoRetention: Number(r.auto_retention),
       checkpointOnSync: r.checkpoint_on_sync === 1,
+      manualSyncCheckpoint: manualModeOf(r.manual_sync_checkpoint),
     };
   },
   setPolicy(databaseId: string, p: Omit<CheckpointPolicy, "versioned">): void {
+    const manual = p.manualSyncCheckpoint === undefined ? (checkpoints.policy(databaseId).manualSyncCheckpoint ?? "ask") : manualModeOf(p.manualSyncCheckpoint);
     db.query(
-      `INSERT INTO checkpoint_policies(database_id, auto_interval_hours, auto_retention, checkpoint_on_sync)
-       VALUES(?, ?, ?, ?)
+      `INSERT INTO checkpoint_policies(database_id, auto_interval_hours, auto_retention, checkpoint_on_sync, manual_sync_checkpoint)
+       VALUES(?, ?, ?, ?, ?)
        ON CONFLICT(database_id) DO UPDATE SET auto_interval_hours = excluded.auto_interval_hours,
-         auto_retention = excluded.auto_retention, checkpoint_on_sync = excluded.checkpoint_on_sync`,
-    ).run(databaseId, p.autoIntervalHours, p.autoRetention, p.checkpointOnSync ? 1 : 0);
+         auto_retention = excluded.auto_retention, checkpoint_on_sync = excluded.checkpoint_on_sync,
+         manual_sync_checkpoint = excluded.manual_sync_checkpoint`,
+    ).run(databaseId, p.autoIntervalHours, p.autoRetention, p.checkpointOnSync ? 1 : 0, manual);
   },
   lastScheduledCheck(databaseId: string): number | null {
     const r = db.query("SELECT last_checked_at FROM checkpoint_schedule WHERE database_id = ?").get(databaseId) as {

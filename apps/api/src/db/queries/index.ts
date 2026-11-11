@@ -14,6 +14,7 @@ export {
   type ProvisioningRow,
 } from "./databases";
 export { syncJobs } from "./syncJobs";
+export { syncBaselines, type SyncBaseline, type BaselineTable } from "./syncBaselines";
 export { snapshots } from "./snapshots";
 export { storageBuckets, storageObjects } from "./storage";
 export { dataApiPolicies } from "./dataApiPolicies";

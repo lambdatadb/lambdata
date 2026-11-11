@@ -8,13 +8,17 @@ Everything lives on the database's **History** tab.
 
 ![History of a database with its checkpoints](screenshots/history.png)
 
+## Settings
+
+Each database has a **Settings** tab. It holds every setting on this page in one place: versioning, the sync schedule (mirrors), how often an automatic checkpoint is taken, how many to keep, **Take the automatic checkpoint right after a sync** (mirrors) and **After a manual sync** (mirrors). An **At a glance** sentence at the top says in plain words what the settings add up to, followed by when the last automatic checkpoint was taken and when the next one is due. The History and Sync tabs show a short summary and link to Settings. Viewers see the same page read-only.
+
 ## Automatic checkpoints
 
-Every database gets automatic checkpoints, versioned or not. The defaults are one a day, keeping the 7 newest. Change them with **Change** in the **Automatic checkpoints** box on the History tab:
+Every database gets automatic checkpoints, versioned or not: **one per period**, "One a day" by default, keeping the 7 newest. The choices are one an hour, one every 6 or 12 hours, one a day, one a week, or off.
 
-- **Automatic checkpoint**: off, every hour, every 6 or 12 hours, daily or weekly. A round is skipped for a database when nothing changed since its last checkpoint, and a database with no tables is not checkpointed.
-- **Automatic checkpoints to keep**: how many of each kind to keep. Scheduled checkpoints, sync checkpoints and safety checkpoints (the ones taken before a rollback, an import or a sync) each keep their own count, so three rollbacks in a row do not push out your daily checkpoints.
-- **Checkpoint after each sync** (mirrors only): see [Mirrors](#mirrors).
+- There is one automatic checkpoint per period, however many syncs run in it. The schedule and scheduled syncs share that one slot.
+- A check that finds nothing changed since the last checkpoint saves nothing, but still counts as that period's check. A database with no tables is not checkpointed.
+- **How many to keep** counts scheduled and sync checkpoints together. Safety checkpoints (the ones taken before a rollback, an import or a sync) keep their own count of the same size, so three rollbacks in a row do not push out your daily checkpoints.
 
 Never removed automatically: checkpoints you made yourself, checkpoints taken after an import, snapshots converted from KilnDB, pinned checkpoints, and the current HEAD.
 
@@ -24,10 +28,10 @@ Checkpoints, rollbacks and syncs are refused while free space on the data volume
 
 ## Versioned databases
 
-Any database can be marked **Versioned**: when you create it, or later with the switch at the top of its History tab. A versioned database is treated as a repository:
+Any database can be marked **Versioned**: when you create it, or later on its **Settings** tab. A versioned database is treated as a repository:
 
 - its card and its page header show the checkpoint it is at, with a dot when it has changes since then;
-- a versioned mirror records a checkpoint after each sync that changed data.
+- a versioned mirror can take its automatic checkpoint right after a sync, and can add checkpoints after a manual sync (see [Mirrors](#mirrors)).
 
 Checkpoints are taken whether a database is versioned or not.
 
@@ -119,13 +123,22 @@ In the rare case where the original table cannot be put back because something e
 
 A mirror copies a MySQL, MariaDB or PostgreSQL database from somewhere else on a schedule. Each sync loads the source into a scratch copy and swaps it in.
 
-When the mirror is versioned and **Checkpoint after each sync** is on (the default):
+On a versioned mirror:
 
-- After each sync that changed data, LambData records a checkpoint "Synced from <host>/<database>".
-- When nobody changed the mirror locally since the last sync, the new data is swapped in without closing any connection. Just before the swap, LambData checks under a lock that the mirror still has not changed, so readers of the mirror wait for one checksum pass at each sync. In our tests that was about 50 ms for a 34 MB mirror and about 1.5 s for a 560 MB mirror.
-- When someone did change the mirror locally, or writes to it while the sync checks, those changes are saved first in a pre-sync checkpoint ("Before sync from ..."). Only in this case is the mirror's account closed for a moment, as in a rollback, and the sync reports how many connections were closed.
+- **Take the automatic checkpoint right after a sync** (on by default): the period's automatic checkpoint is taken by the first scheduled sync once it is due, so it matches a finished sync ("Synced from <host>/<database>"). The other syncs in that period record no checkpoint. If the sync is switched off, failing or overdue, the schedule takes the checkpoint on its own, as for any database. With this switch off, syncs never take a checkpoint and the schedule takes it on its own clock.
+- To have a checkpoint after every sync, set the checkpoint interval to the sync interval. With a sync interval longer than the checkpoint interval, there is at most one checkpoint per sync. With automatic checkpoints off, syncs record none.
+- **Sync now** never uses the period's automatic checkpoint. It can add an **additional** checkpoint ("After manual sync from <host>/<database>"), which is kept until you delete it, like one you made by hand. By default it asks each time, with **Don't ask again for this database**; **After a manual sync** on the Settings tab (Ask each time, Always add a checkpoint, Never) changes or undoes that choice. If nothing changed since the last checkpoint, no additional one is saved.
 
-A mirror that is not versioned, or has **Checkpoint after each sync** off, is swapped in without that check and pays nothing extra.
+Between automatic checkpoints, the mirror's History reads **Synced data, not yet in a checkpoint** instead of uncommitted changes: the live data differs from the last checkpoint only by what the syncs delivered since, and nobody changed it locally.
+
+### Local changes on a mirror
+
+With **Take the automatic checkpoint right after a sync** on, each sync records a fingerprint of exactly what it delivered (every table's rows, checksum and definition, and the views, triggers and routines). The next sync compares the live mirror with that fingerprint, or with the last checkpoint:
+
+- When either matches, nobody changed the mirror locally, and the new data is swapped in without closing any connection. Just before the swap, LambData checks under a lock that the mirror still has not changed, so readers of the mirror wait for one checksum pass at each sync. In our tests that was about 50 ms for a 34 MB mirror and about 1.5 s for a 560 MB mirror.
+- When neither matches, someone changed the mirror locally, or wrote to it while the sync checked. Those changes are saved first in a pre-sync checkpoint ("Before sync from ..."). Only in this case is the mirror's account closed for a moment, as in a rollback, and the sync reports how many connections were closed.
+
+A mirror that is not versioned, or has **Take the automatic checkpoint right after a sync** off, is swapped in without that check and pays nothing extra.
 
 ## Snapshots from KilnDB
 

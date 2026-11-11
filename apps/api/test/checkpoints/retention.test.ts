@@ -77,20 +77,20 @@ describe.skipIf(!mariadbAvailable())("retention, deletion and scheduling", () =>
       auto.push((await createCheckpoint(database.id, { trigger: i === 4 ? "pre-restore" : "sync" })).checkpointId!);
     }
     const ids = checkpoints.listForDatabase(database.id).map((c) => c.id);
-    expect(ids.sort()).toEqual([manual, ...auto].sort());
+    expect(ids.sort()).toEqual([manual, auto[0]!, auto[2]!, auto[3]!, auto[4]!].sort());
 
     databases.setBaseCheckpoint(database.id, auto[3]!);
     checkpoints.setPolicy(database.id, { autoIntervalHours: 24, autoRetention: 1, checkpointOnSync: true });
     await applyRetention(database.id);
     const left = checkpoints.listForDatabase(database.id).map((c) => c.id);
-    expect(left.sort()).toEqual([manual, auto[0]!, auto[2]!, auto[3]!, auto[4]!].sort());
+    expect(left.sort()).toEqual([manual, auto[0]!, auto[3]!, auto[4]!].sort());
 
     for (let i = 6; i <= 8; i++) {
       await change(database.name, i);
       await createCheckpoint(database.id, { trigger: i === 8 ? "pre-import" : "pre-restore" });
     }
     const after = checkpoints.listForDatabase(database.id);
-    expect(after.filter((c) => c.trigger === "scheduled").map((c) => c.id).sort()).toEqual([auto[0]!, auto[2]!].sort());
+    expect(after.filter((c) => c.trigger === "scheduled").map((c) => c.id)).toEqual([auto[0]!]);
     expect(after.filter((c) => c.trigger === "sync").map((c) => c.id)).toEqual([auto[4]!]);
     expect(after.filter((c) => ["pre-restore", "pre-import", "pre-sync"].includes(c.trigger)).length).toBe(1);
     for (const id of left) {

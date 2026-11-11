@@ -16,6 +16,8 @@ import { toast } from "../../components/ui/Toast";
 import { useCredentialsReveal } from "../../components/databases/CredentialsReveal";
 import { VitalsStrip } from "../../components/databases/VitalsStrip";
 import { RepoBadge } from "../../components/checkpoints/RepoBadge";
+import { compactSummary } from "../../components/checkpoints/policy";
+import { useCheckpointList } from "../../components/checkpoints/queries";
 import { api, errorMessage } from "../../lib/api";
 import { useAuth, useCanWriteDatabase } from "../../lib/auth";
 import { databasePath } from "../../lib/commands";
@@ -232,6 +234,7 @@ function DetailsCard({ db }: { db: Database }) {
   const patch = usePatchDatabase(db);
   const [optimistic, setOptimistic] = useState<boolean | null>(null);
   const showInVitals = optimistic ?? db.showInVitals;
+  const policy = useCheckpointList(db.id).data?.policy;
 
   return (
     <Card flush className="h-fit">
@@ -246,12 +249,21 @@ function DetailsCard({ db }: { db: Database }) {
           <DescriptionItem term="Status">
             <span className="capitalize">{db.status}</span>
           </DescriptionItem>
-          <DescriptionItem term="History">
+          <DescriptionItem term="Checkpoints">
+            <Link
+              to={databasePath(db.id, "settings")}
+              className="rounded-sm outline-none hover:text-text focus-visible:ring-2 focus-visible:ring-ring/70"
+              data-overview-schedule
+            >
+              {policy ? compactSummary(policy, db.kind === "mirror") : "—"}
+            </Link>
+          </DescriptionItem>
+          <DescriptionItem term="Versioned">
             <Link
               to={databasePath(db.id, "history")}
               className="inline-flex items-center gap-2 rounded-sm outline-none hover:text-text focus-visible:ring-2 focus-visible:ring-ring/70"
             >
-              {db.versioned ? <RepoBadge db={db} live /> : "Daily checkpoints"}
+              {db.versioned ? <RepoBadge db={db} live /> : "No"}
             </Link>
           </DescriptionItem>
         </DescriptionList>

@@ -1,5 +1,6 @@
 import type { RowDataPacket } from "mysql2/promise";
-import { checkpoints, databases } from "../db/queries";
+import type { CheckpointSchedule } from "@lambdata/shared";
+import { checkpoints, databases, syncJobs } from "../db/queries";
 import { isDatabaseBusy, JobConflictError, startJob, waitForJob } from "../jobs";
 import { registerService, safeTick, type BackgroundService } from "../lifecycle";
 import { mariadbState, withRootConnection } from "../mariadb/controller";
@@ -29,10 +30,12 @@ function capped<T>(p: Promise<T>, ms: number): Promise<T | null> {
 }
 
 export function lastAutomaticCheck(databaseId: string): number | null {
-  const checked = checkpoints.lastScheduledCheck(databaseId);
-  const created = checkpoints.lastCreatedAt(databaseId, "scheduled");
-  if (checked === null && created === null) return null;
-  return Math.max(checked ?? 0, created ?? 0);
+  const times = [
+    checkpoints.lastScheduledCheck(databaseId),
+    checkpoints.lastCreatedAt(databaseId, "scheduled"),
+    checkpoints.lastCreatedAt(databaseId, "sync"),
+  ].filter((t): t is number => t !== null);
+  return times.length > 0 ? Math.max(...times) : null;
 }
 
 export function isScheduledCheckpointDue(databaseId: string, now: number): boolean {
@@ -40,6 +43,32 @@ export function isScheduledCheckpointDue(databaseId: string, now: number): boole
   if (autoIntervalHours <= 0) return false;
   const last = lastAutomaticCheck(databaseId);
   return last === null || now - last >= autoIntervalHours * HOUR_MS - DUE_TOLERANCE_MS;
+}
+
+export function nextAutomaticDueAt(databaseId: string, now: number = Date.now()): number | null {
+  const { autoIntervalHours } = checkpoints.policy(databaseId);
+  if (autoIntervalHours <= 0) return null;
+  const last = lastAutomaticCheck(databaseId);
+  if (last === null) return now;
+  return Math.max(now, last + autoIntervalHours * HOUR_MS - DUE_TOLERANCE_MS);
+}
+
+export function automaticSchedule(databaseId: string, now: number = Date.now()): CheckpointSchedule {
+  return { lastAutomaticAt: lastAutomaticCheck(databaseId), nextDueAt: nextAutomaticDueAt(databaseId, now) };
+}
+
+export function consumeAutomaticSlot(databaseId: string, at: number): void {
+  checkpoints.markScheduledCheck(databaseId, at);
+}
+
+export function syncTakesAutomaticSlot(databaseId: string, now: number = Date.now()): boolean {
+  const row = databases.byId(databaseId);
+  if (!row || row.kind !== "mirror" || !row.versioned) return false;
+  if (!checkpoints.policy(databaseId).checkpointOnSync) return false;
+  const job = syncJobs.byDatabaseId(databaseId);
+  if (!job || !job.enabled || job.lastStatus !== "ok" || !job.lastRunAt) return false;
+  const window = Math.max(2 * job.intervalSeconds * 1000, HOUR_MS);
+  return now - job.lastRunAt <= window;
 }
 
 export function noteSkippedForDisk(scope: string, err: DiskSpaceError, now: number = Date.now()): void {
@@ -93,6 +122,7 @@ export async function dueScheduledCheckpoints(now: number = Date.now()): Promise
     .filter((d) => (facts.get(d.name)?.tables ?? 0) > 0)
     .filter((d) => !snapshotAwaitingConversion(d.id))
     .filter((d) => isScheduledCheckpointDue(d.id, now))
+    .filter((d) => !syncTakesAutomaticSlot(d.id, now))
     .sort((a, b) => (facts.get(a.name)?.bytes ?? 0) - (facts.get(b.name)?.bytes ?? 0) || (a.name < b.name ? -1 : 1))
     .map((d) => d.id);
 }
@@ -106,7 +136,7 @@ export async function runScheduledCheckpoints(now: number = Date.now()): Promise
   for (const id of await dueScheduledCheckpoints(now)) {
     if (mariadbState() !== "running") break;
     const row = databases.byId(id);
-    if (!row || isDatabaseBusy(id) || !isScheduledCheckpointDue(id, Date.now())) continue;
+    if (!row || isDatabaseBusy(id) || !isScheduledCheckpointDue(id, Date.now()) || syncTakesAutomaticSlot(id)) continue;
     let jobId: string | null;
     try {
       jobId = startScheduledCheckpoint(id);

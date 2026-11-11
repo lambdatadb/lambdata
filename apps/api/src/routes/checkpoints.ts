@@ -7,6 +7,7 @@ import type {
   CheckpointDiffResponse,
   CheckpointListResponse,
   CheckpointPolicy,
+  CheckpointPolicyResponse,
   CheckpointStatusResponse,
   RestoreCheckpointRequest,
 } from "@lambdata/shared";
@@ -19,6 +20,7 @@ import { createCheckpoint, deleteCheckpoint, restoreCheckpoint } from "../checkp
 import { normalizeMessage } from "../checkpoints/capture";
 import { checkpointDownloadStream, downloadFileName } from "../checkpoints/download";
 import { CheckpointDataMissingError } from "../checkpoints/restore";
+import { automaticSchedule } from "../checkpoints/scheduler";
 import { boundedLiveSnapshot, diffAgainstLive, diffEntries, getWorkingCopyStatus } from "../checkpoints/status";
 import { notRespondingMessage } from "../util/mariadbHealth";
 
@@ -36,6 +38,7 @@ const policyBody = z
     autoIntervalHours: z.number().int().min(0).max(8760).optional(),
     autoRetention: z.number().int().min(1).max(1000).optional(),
     checkpointOnSync: z.boolean().optional(),
+    manualSyncCheckpoint: z.enum(["ask", "always", "never"]).optional(),
   })
   .strict();
 const restoreBody = z.object({ allowCodeFailures: z.boolean().optional() });
@@ -78,6 +81,7 @@ checkpointsRoute.get("/:id/checkpoints", requireDbAccess("id", "read"), (c) => {
     policy: policyFor(id),
     storage: checkpoints.storage(id),
     unconverted: checkpoints.conversionFailures(id),
+    schedule: automaticSchedule(id),
   };
   return c.json(res);
 });
@@ -98,12 +102,14 @@ checkpointsRoute.put("/:id/checkpoints/policy", requireDbAccess("id", "write"), 
     autoIntervalHours: body.autoIntervalHours ?? current.autoIntervalHours,
     autoRetention: body.autoRetention ?? current.autoRetention,
     checkpointOnSync: body.checkpointOnSync ?? current.checkpointOnSync,
+    manualSyncCheckpoint: body.manualSyncCheckpoint ?? current.manualSyncCheckpoint ?? "ask",
   };
   assertCheckpointPolicyAllowed({ role: c.get("user").role, next, current });
   checkpoints.setPolicy(id, next);
   if (body.versioned !== undefined) databases.update(id, { versioned: body.versioned });
   audit.log(c.get("user").id, "checkpoint.policy", id, body);
-  return c.json({ policy: policyFor(id) });
+  const res: CheckpointPolicyResponse = { policy: policyFor(id), schedule: automaticSchedule(id) };
+  return c.json(res);
 });
 
 checkpointsRoute.post("/:id/checkpoints", requireDbAccess("id", "write"), async (c) => {

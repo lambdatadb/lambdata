@@ -9,6 +9,7 @@ import { isJobActive, jobKindLabel } from "../../lib/jobs";
 import { createLimitations, createVerified, isCodeRefusal, jobCodeFailures, jobState, refusedTargetHash } from "../../lib/jobOutcome";
 import { ForceRollbackDialog } from "./ForceRollbackDialog";
 import { startRollback } from "./queries";
+import { syncCheckpointLine } from "./policy";
 import type { TrackedJobMeta } from "./useHistoryJobs";
 
 const hash = (h: string) => <span className="font-mono text-code text-text">{h}</span>;
@@ -122,8 +123,18 @@ export function operationSuccess(job: Job, meta: TrackedJobMeta | null, byId: Ma
   if (job.kind === "sync.run") {
     const r = job.result as unknown as SyncJobResult;
     const cp = r.checkpointId ? byId.get(r.checkpointId) : null;
-    if (withErrors) return <p>The tables were synced and are in place. The objects listed below could not be created in the mirror.</p>;
-    return <p>{r.unchanged || !r.checkpointId ? "Synced; no data changed." : <>Synced and recorded {cp ? hash(cp.shortHash) : "a checkpoint"}.</>}</p>;
+    const line = syncCheckpointLine(r, cp?.shortHash ?? null);
+    const lead = withErrors
+      ? "The tables were synced and are in place. The objects listed below could not be created in the mirror."
+      : r.unchanged
+        ? "Synced; no data changed."
+        : "Synced.";
+    return (
+      <p>
+        {lead}
+        {line && <> {line.text.endsWith(".") ? line.text : `${line.text}.`}</>}
+      </p>
+    );
   }
   return null;
 }

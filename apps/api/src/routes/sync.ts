@@ -63,12 +63,15 @@ syncRoute.put("/:id/sync", requireDbAccess("id", "write"), async (c) => {
   return c.json({ sync: syncJobs.byDatabaseId(id) });
 });
 
-syncRoute.post("/:id/sync/run", requireDbAccess("id", "write"), (c) => {
+const runBody = z.object({ checkpoint: z.boolean().optional() }).strict();
+
+syncRoute.post("/:id/sync/run", requireDbAccess("id", "write"), async (c) => {
   const id = c.req.param("id");
   if (!syncJobs.byDatabaseId(id)) throw new HTTPException(404, { message: "no sync configured" });
+  const body = await parseJson(c, runBody);
   const user = c.get("user");
-  const job = startSyncJob(id, user.id);
-  audit.log(user.id, "sync.run", id, { jobId: job.id });
+  const job = startSyncJob(id, user.id, { manual: true, checkpoint: body.checkpoint });
+  audit.log(user.id, "sync.run", id, { jobId: job.id, ...(body.checkpoint === undefined ? {} : { checkpoint: body.checkpoint }) });
   return jobAcceptedResponse(c, job);
 });
 

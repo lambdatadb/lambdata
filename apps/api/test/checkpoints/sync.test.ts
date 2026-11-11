@@ -104,7 +104,7 @@ describe.skipIf(!mariadbAvailable())("mirror sync", () => {
     expect(checkpoints.byId(firstCp)).toMatchObject({ trigger: "sync", message: `Synced from 127.0.0.1/${primary.database.name}` });
 
     const unchanged = await sync(mirror.database.id);
-    expect(unchanged.result).toMatchObject({ checkpointId: null, unchanged: true, preSyncCheckpointId: null });
+    expect(unchanged.result).toMatchObject({ checkpointId: null, checkpointSkipped: "not-due", preSyncCheckpointId: null });
 
     const user = await mysql.createConnection({
       host: "127.0.0.1",
@@ -127,7 +127,7 @@ describe.skipIf(!mariadbAvailable())("mirror sync", () => {
     const pre = checkpoints.byId(String(third.result!.preSyncCheckpointId))!;
     expect(pre.trigger).toBe("pre-sync");
     expect(pre.parentId).toBe(firstCp);
-    expect(checkpoints.byId(String(third.result!.checkpointId))!.parentId).toBe(pre.id);
+    expect(third.result).toMatchObject({ checkpointId: null, checkpointSkipped: "not-due" });
     expect(await checksums(mirror.database.name)).toEqual(await checksums(primary.database.name));
     expect(await stagingSchemas()).toEqual([]);
   }, 240_000);
@@ -157,7 +157,7 @@ describe.skipIf(!mariadbAvailable())("mirror sync", () => {
       await exec(primary.database.name, "INSERT INTO settings VALUES ('from', 'primary')");
       const clean = await sync(mirror.database.id);
       expect(clean.status).toBe("succeeded");
-      expect(clean.result).toMatchObject({ preSyncCheckpointId: null, unchanged: false });
+      expect(clean.result).toMatchObject({ preSyncCheckpointId: null, checkpointSkipped: "not-due" });
       expect(clean.warnings.filter((w) => /connection/.test(w))).toEqual([]);
       expect(fence.seen()).toBe(false);
       expect(await connectionId(reader)).toBe(before);

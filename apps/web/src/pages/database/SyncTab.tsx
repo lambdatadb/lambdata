@@ -1,8 +1,8 @@
-import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { useEffect, useRef, useState } from "react";
+import { Link, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { GitBranch, Play } from "lucide-react";
-import type { Database, Job, JobResponse, SyncJob, SyncJobResult, SyncSourceKind } from "@lambdata/shared";
+import { CalendarClock, Play, SlidersHorizontal } from "lucide-react";
+import type { CheckpointPolicy, Database, Job, SyncJob, SyncJobResult, SyncSourceKind } from "@lambdata/shared";
 import { QueryError } from "../../components/layout/QueryError";
 import { CodeFailureList } from "../../components/jobs/CodeFailureList";
 import { JobConflictNotice } from "../../components/jobs/JobConflictNotice";
@@ -15,9 +15,10 @@ import { Field, FieldGroup } from "../../components/ui/Field";
 import { Input } from "../../components/ui/Input";
 import { SelectMenu } from "../../components/ui/Select";
 import { SkeletonRows } from "../../components/ui/Skeleton";
-import { Switch } from "../../components/ui/Switch";
 import { useToast } from "../../components/ui/Toast";
 import { invalidateHistory, useCheckpointList, useDatabaseJobs } from "../../components/checkpoints/queries";
+import { compactSummary, formatDue, settingsSummary, syncCheckpointLine, syncIntervalLabel } from "../../components/checkpoints/policy";
+import { useSyncNow } from "../../components/sync/SyncNow";
 import { api, errorMessage } from "../../lib/api";
 import { useCanWriteDatabase } from "../../lib/auth";
 import { databasePath } from "../../lib/commands";
@@ -75,20 +76,36 @@ function SyncStatusCard({ db, current }: { db: Database; current: SyncJob }) {
         });
       } else if (job.status === "succeeded") {
         const r = job.result as unknown as SyncJobResult | null;
+        const line = r ? syncCheckpointLine(r, null, intervalRef.current) : null;
         toast.success("Sync finished", {
-          description: r ? (r.unchanged ? "No data changed." : `${pluralize(r.tables, "table")} copied.`) : undefined,
+          description: r ? [r.unchanged ? "No data changed." : `${pluralize(r.tables, "table")} copied.`, line ? `${line.text}.`.replace(/\.\.$/, ".") : null].filter(Boolean).join(" ") : undefined,
         });
       }
     },
   });
 
-  const run = useMutation({
-    mutationFn: () => api.post<JobResponse>(`/databases/${db.id}/sync/run`),
-    onSuccess: (res) => {
-      track(res.job);
-      setJobId(res.job.id);
-    },
+  const intervalRef = useRef<number | null>(null);
+  intervalRef.current = history.data?.policy.autoIntervalHours ?? null;
+  const sync = useSyncNow(db, (job) => {
+    track(job);
+    setJobId(job.id);
   });
+  const run = sync.run;
+  const [params, setParams] = useSearchParams();
+  const wantsRun = params.get("run") === "1";
+
+  useEffect(() => {
+    if (!wantsRun || !sync.ready) return;
+    setParams(
+      (p) => {
+        const next = new URLSearchParams(p);
+        next.delete("run");
+        return next;
+      },
+      { replace: true },
+    );
+    if (canWrite && !active.hasActive) sync.start();
+  }, [wantsRun, sync.ready]);
 
   const otherActive = active.jobs.find((j) => j.id !== jobId && isJobActive(j)) ?? null;
   const live: Job | null = started.job && (isJobActive(started.job) || revealed === started.job.id) ? started.job : otherActive;
@@ -115,7 +132,7 @@ function SyncStatusCard({ db, current }: { db: Database; current: SyncJob }) {
   const recorded = lastResult?.checkpointId ? byId.get(lastResult.checkpointId) : null;
   const preSync = lastResult?.preSyncCheckpointId ? byId.get(lastResult.preSyncCheckpointId) : null;
   const policy = history.data?.policy;
-  const recordsHistory = db.versioned && (policy?.checkpointOnSync ?? true);
+  const lastLine = lastResult ? syncCheckpointLine(lastResult, recorded?.shortHash ?? null, policy?.autoIntervalHours ?? null) : null;
   const showPanel = live && revealed === live.id;
 
   return (
@@ -133,12 +150,12 @@ function SyncStatusCard({ db, current }: { db: Database; current: SyncJob }) {
             <Button
               size="sm"
               variant="secondary"
-              onClick={() => run.mutate()}
+              onClick={sync.start}
               loading={run.isPending || (started.isActive && !showPanel)}
-              disabled={busy}
+              disabled={busy || !sync.ready}
             >
               <Play />
-              Run now
+              Sync now
             </Button>
           ) : undefined
         }
@@ -156,7 +173,7 @@ function SyncStatusCard({ db, current }: { db: Database; current: SyncJob }) {
                     ? "Sync finished with errors"
                     : "Sync finished"
             }
-            successMessage={syncSummary(live, byId)}
+            successMessage={syncSummary(live, byId, policy?.autoIntervalHours ?? null)}
           />
         ) : (
           <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1.5 text-body">
@@ -171,21 +188,22 @@ function SyncStatusCard({ db, current }: { db: Database; current: SyncJob }) {
                 {lastResult && (
                   <span className="basis-full text-text-muted sm:basis-auto">
                     <span aria-hidden className="hidden sm:inline">· </span>
-                    {pluralize(lastResult.tables, "table")} ·{" "}
-                    {lastResult.unchanged || !lastResult.checkpointId ? (
-                      "no data changed"
-                    ) : recorded ? (
+                    {pluralize(lastResult.tables, "table")} · {lastResult.unchanged ? "no data changed" : "data changed"}
+                    {lastLine && (
                       <>
-                        recorded{" "}
-                        <Link
-                          to={databasePath(db.id, "history", encodeURIComponent(recorded.id))}
-                          className="font-mono text-code text-text underline decoration-border-control underline-offset-4 hover:decoration-accent"
-                        >
-                          {recorded.shortHash}
-                        </Link>
+                        {" "}
+                        ·{" "}
+                        {recorded ? (
+                          <Link
+                            to={databasePath(db.id, "history", encodeURIComponent(recorded.id))}
+                            className="text-text underline decoration-border-control underline-offset-4 hover:decoration-accent"
+                          >
+                            {lastLine.text}
+                          </Link>
+                        ) : (
+                          <span className={lastLine.tone === "warn" ? "text-warn" : undefined}>{lastLine.text}</span>
+                        )}
                       </>
-                    ) : (
-                      "data changed"
                     )}
                     {preSync && (
                       <>
@@ -236,35 +254,41 @@ function SyncStatusCard({ db, current }: { db: Database; current: SyncJob }) {
             {errorMessage(run.error)}
           </Alert>
         )}
-        <p className="flex items-start gap-2 text-label text-text-muted">
-          <GitBranch aria-hidden className="mt-0.5 size-3.5 shrink-0 text-text-subtle" />
-          <span>
-            {recordsHistory ? (
-              <>
-                This mirror is versioned: each sync that changes data is recorded in <HistoryLink db={db} /> as a checkpoint, and
-                local edits are saved first so a sync never silently overwrites them.
-              </>
-            ) : db.versioned ? (
-              <>
-                Checkpoints after sync are turned off in the <HistoryLink db={db} /> policy, so syncs are not recorded.
-              </>
-            ) : (
-              <>
-                Turn on versioning in <HistoryLink db={db} /> to record each sync that changes data as a checkpoint you can roll
-                back to.
-              </>
-            )}
-          </span>
-        </p>
+        <ScheduleNote db={db} current={current} policy={policy} />
       </CardContent>
+      {sync.dialog}
     </Card>
   );
 }
 
-function HistoryLink({ db }: { db: Database }) {
+function ScheduleNote({ db, current, policy }: { db: Database; current: SyncJob; policy: CheckpointPolicy | undefined }) {
+  const next = useCheckpointList(db.id).data?.schedule?.nextDueAt ?? null;
   return (
-    <Link to={databasePath(db.id, "history")} className="text-text underline decoration-border-control underline-offset-4 hover:decoration-accent">
-      History
+    <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-2 rounded-md border border-border bg-bg-inset px-3 py-2.5" data-sync-schedule>
+      <div className="flex min-w-0 items-start gap-2 text-label text-text-muted">
+        <CalendarClock aria-hidden className="mt-0.5 size-3.5 shrink-0 text-text-subtle" />
+        <div className="min-w-0 space-y-0.5">
+          <p>
+            <span className="text-text">{current.enabled ? syncIntervalLabel(current.intervalSeconds) : "Paused"}</span>
+            {policy && <> · checkpoints: {compactSummary(policy, true).toLowerCase()}</>}
+            {next && <> · next checkpoint due after {formatDue(next)}</>}
+          </p>
+          {policy && <p className="text-text-subtle">{settingsSummary({ kind: "mirror", policy, sync: current }).slice(1).join(" ")}</p>}
+        </div>
+      </div>
+      <SettingsLink db={db} />
+    </div>
+  );
+}
+
+function SettingsLink({ db }: { db: Database }) {
+  return (
+    <Link
+      to={databasePath(db.id, "settings")}
+      className="inline-flex shrink-0 items-center gap-1.5 text-label text-text underline decoration-border-control underline-offset-4 hover:decoration-accent"
+    >
+      <SlidersHorizontal aria-hidden className="size-3.5" />
+      Change in Settings
     </Link>
   );
 }
@@ -275,29 +299,25 @@ function everyLabel(seconds: number): string {
   return `${seconds} seconds`;
 }
 
-function syncSummary(job: Job, byId: Map<string, { shortHash: string }>) {
+export function syncSummary(job: Job, byId: Map<string, { shortHash: string }>, intervalHours: number | null = null) {
   if (job.status !== "succeeded" || !job.result) return null;
   const r = job.result as unknown as SyncJobResult;
-  if (jobState(job) === "done-with-errors") {
-    const cp = r.checkpointId ? byId.get(r.checkpointId) : null;
-    return (
-      <>
-        {pluralize(r.tables, "table")} copied and in place
-        {cp ? (
-          <>
-            , recorded as <span className="font-mono text-code text-text">{cp.shortHash}</span>
-          </>
-        ) : null}
-        . Some objects from the source could not be created in the mirror; they are listed below.
-      </>
-    );
-  }
-  if (r.unchanged || !r.checkpointId) return `${pluralize(r.tables, "table")} copied; no data changed.`;
-  const cp = byId.get(r.checkpointId);
+  const cp = r.checkpointId ? byId.get(r.checkpointId) : null;
+  const line = syncCheckpointLine(r, cp?.shortHash ?? null, intervalHours);
+  const copied = jobState(job) === "done-with-errors" ? `${pluralize(r.tables, "table")} copied and in place` : `${pluralize(r.tables, "table")} copied`;
+  const changed = r.unchanged ? "; no data changed" : "";
   return (
     <>
-      {pluralize(r.tables, "table")} copied and recorded as{" "}
-      {cp ? <span className="font-mono text-code text-text">{cp.shortHash}</span> : "a checkpoint"}.
+      <span className="block">
+        {copied}
+        {changed}.
+        {jobState(job) === "done-with-errors" ? " Some objects from the source could not be created in the mirror; they are listed below." : ""}
+      </span>
+      {line && (
+        <span className={line.tone === "warn" ? "block text-warn" : line.tone === "success" ? "block text-text" : "block"} data-sync-checkpoint={r.checkpointKind ?? r.checkpointSkipped ?? "none"}>
+          {line.text.endsWith(".") ? line.text : `${line.text}.`}
+        </span>
+      )}
     </>
   );
 }
@@ -314,8 +334,6 @@ function SyncForm({ db, current }: { db: Database; current: SyncJob | null }) {
   const [sourceUser, setSourceUser] = useState(current?.sourceUser ?? "");
   const [sourcePassword, setSourcePassword] = useState("");
   const [sourceDatabase, setSourceDatabase] = useState(current?.sourceDatabase ?? "");
-  const [intervalSeconds, setIntervalSeconds] = useState(String(current?.intervalSeconds ?? 3600));
-  const [enabled, setEnabled] = useState(current?.enabled ?? true);
 
   const save = useMutation({
     mutationFn: () =>
@@ -326,8 +344,8 @@ function SyncForm({ db, current }: { db: Database; current: SyncJob | null }) {
         sourceUser: sourceUser.trim(),
         sourcePassword: sourcePassword || undefined,
         sourceDatabase: sourceDatabase.trim(),
-        intervalSeconds: Math.max(60, Number(intervalSeconds) || 3600),
-        enabled,
+        intervalSeconds: current?.intervalSeconds ?? 3600,
+        enabled: current?.enabled ?? true,
       }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: queryKeys.sync(db.id) });
@@ -361,9 +379,6 @@ function SyncForm({ db, current }: { db: Database; current: SyncJob | null }) {
                   ]}
                 />
               </Field>
-              <Field label={t("intervalSeconds")} hint="At least 60 seconds">
-                <Input mono type="number" inputMode="numeric" value={intervalSeconds} min={60} onChange={(e) => setIntervalSeconds(e.target.value)} />
-              </Field>
               <Field label="Source host" required>
                 <Input mono value={sourceHost} onChange={(e) => setSourceHost(e.target.value)} placeholder="db.example.com" autoComplete="off" spellCheck={false} />
               </Field>
@@ -380,17 +395,11 @@ function SyncForm({ db, current }: { db: Database; current: SyncJob | null }) {
                 <Input mono value={sourceDatabase} onChange={(e) => setSourceDatabase(e.target.value)} autoComplete="off" spellCheck={false} />
               </Field>
             </FieldGroup>
-            <Switch
-              className="mt-5"
-              checked={enabled}
-              onCheckedChange={setEnabled}
-              label="Sync on a schedule"
-              description={
-                enabled
-                  ? "On. The mirror is refreshed at the interval above; Run now works either way."
-                  : "Paused. The mirror keeps its current data until you run a sync by hand or turn this back on."
-              }
-            />
+            <p className="mt-5 text-label text-text-muted">
+              {current
+                ? "How often it syncs, and the checkpoints it records, are set in Settings."
+                : "Once saved, it syncs every hour. Change how often, and the checkpoints it records, in Settings."}
+            </p>
           </fieldset>
         </CardContent>
         {canWrite && (

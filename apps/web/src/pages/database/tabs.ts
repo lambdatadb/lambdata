@@ -5,6 +5,7 @@ import {
   History,
   LayoutPanelTop,
   RefreshCw,
+  SlidersHorizontal,
   SquareTerminal,
   Table2,
   TriangleAlert,
@@ -25,6 +26,7 @@ const HistoryTab = tab(() => import("./HistoryTab"), "HistoryTab");
 const SyncTab = tab(() => import("./SyncTab"), "SyncTab");
 const ImportTab = tab(() => import("./ImportTab"), "ImportTab");
 const MetricsTab = tab(() => import("./MetricsTab"), "MetricsTab");
+const SettingsTab = tab(() => import("./SettingsTab"), "SettingsTab");
 const DangerTab = tab(() => import("./DangerTab"), "DangerTab");
 
 export interface DatabaseTabDefinition {
@@ -45,6 +47,7 @@ export const DATABASE_TABS: DatabaseTabDefinition[] = [
   { id: "sync", label: "Sync", icon: RefreshCw, component: SyncTab, visible: (db) => db.kind === "mirror" },
   { id: "import", label: "Import", icon: FileUp, component: ImportTab, visible: canWrite },
   { id: "metrics", label: "Metrics", icon: ChartLine, component: MetricsTab },
+  { id: "settings", label: "Settings", icon: SlidersHorizontal, component: SettingsTab },
   { id: "danger", label: "Danger", icon: TriangleAlert, component: DangerTab, visible: canWrite },
 ];
 

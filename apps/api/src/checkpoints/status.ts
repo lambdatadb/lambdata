@@ -5,6 +5,7 @@ import { isDatabaseBusy } from "../jobs";
 import { openAdminConnection } from "../mariadb/controller";
 import { healthLimits, mariadbResponding, notRespondingMessage } from "../util/mariadbHealth";
 import { collectLiveStats, liveCodeHash, type LiveStats } from "./capture";
+import { matchesLastSync } from "./syncBaseline";
 
 export const STATUS_TTL_MS = 30_000;
 export const AUTO_STATUS_MAX_BYTES = 2 * 1024 * 1024 * 1024;
@@ -235,6 +236,7 @@ export async function getWorkingCopyStatus(
     reason: null,
     computedAt: live.computedAt,
     diff,
+    matchesLastSync: matchesLastSync(databaseId, live.stats.tables, live.codeHash),
   };
 }
 

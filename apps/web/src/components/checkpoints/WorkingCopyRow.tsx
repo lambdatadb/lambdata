@@ -31,7 +31,12 @@ export interface WorkingCopyRowProps {
   createDisabled: string | null;
 }
 
+export function syncedOnly(status: WorkingCopyStatus | undefined): boolean {
+  return status?.state === "dirty" && status.matchesLastSync === true;
+}
+
 export function workingTone(status: WorkingCopyStatus | undefined): WorkingTone {
+  if (syncedOnly(status)) return "muted";
   if (status?.state === "dirty") return "dirty";
   if (status?.state === "clean") return "clean";
   return "muted";
@@ -163,6 +168,7 @@ function StateChip({
   if (loading) return <Skeleton className="h-[18px] w-14" />;
   if (error || !status) return <span className={cn(base, "border-border text-text-muted")}>status unavailable</span>;
   if (status.state === "clean") return <span className={cn(base, "border-success/30 bg-success/[0.08] text-success")}>clean</span>;
+  if (syncedOnly(status)) return <span className={cn(base, "border-info/30 bg-info/[0.08] text-info")}>synced, not in a checkpoint</span>;
   if (status.state === "dirty") return <span className={cn(base, "border-warn/30 bg-warn/[0.08] text-warn")}>uncommitted changes</span>;
   if (status.state === "no-checkpoint") return <span className={cn(base, "border-border text-text-muted")}>no checkpoints yet</span>;
   return <span className={cn(base, "border-border text-text-muted")}>not checked</span>;
@@ -190,6 +196,13 @@ function Detail({
   if (!status) return null;
   if (status.state === "clean") {
     return <span>The live data matches {baseShort ? hash(baseShort) : "HEAD"}</span>;
+  }
+  if (syncedOnly(status) && status.diff) {
+    return (
+      <span>
+        Synced data, not yet in a checkpoint: {diffSummary(status.diff)} since {baseShort ? hash(baseShort) : "HEAD"}
+      </span>
+    );
   }
   if (status.state === "dirty" && status.diff) {
     return (

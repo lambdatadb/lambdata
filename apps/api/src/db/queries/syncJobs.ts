@@ -89,7 +89,10 @@ export const syncJobs = {
     ).run(Date.now(), status, error, databaseId);
   },
   deleteByDatabaseId(databaseId: string): void {
-    db.query("DELETE FROM sync_jobs WHERE database_id = ?").run(databaseId);
+    db.transaction(() => {
+      db.query("DELETE FROM sync_jobs WHERE database_id = ?").run(databaseId);
+      db.query("DELETE FROM sync_baselines WHERE database_id = ?").run(databaseId);
+    })();
   },
   listEnabled(): (SyncJob & { passwordEnc: string })[] {
     const rows = db.query("SELECT * FROM sync_jobs WHERE enabled = 1").all() as SyncRow[];

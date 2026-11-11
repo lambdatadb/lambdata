@@ -71,13 +71,22 @@ export interface WorkingCopyStatus {
   reason: string | null;
   computedAt: number | null;
   diff: CheckpointDiff | null;
+  matchesLastSync?: boolean;
 }
+
+export type ManualSyncCheckpointMode = "ask" | "always" | "never";
 
 export interface CheckpointPolicy {
   versioned: boolean;
   autoIntervalHours: number;
   autoRetention: number;
   checkpointOnSync: boolean;
+  manualSyncCheckpoint?: ManualSyncCheckpointMode;
+}
+
+export interface CheckpointSchedule {
+  lastAutomaticAt: number | null;
+  nextDueAt: number | null;
 }
 
 export interface CheckpointStorageStats {
@@ -102,6 +111,7 @@ export interface CheckpointListResponse {
   policy: CheckpointPolicy;
   storage: CheckpointStorageStats;
   unconverted?: UnconvertedSnapshot[];
+  schedule?: CheckpointSchedule;
 }
 
 export interface CheckpointHealthDetail {
@@ -163,11 +173,27 @@ export type UpdateCheckpointPolicyRequest = Partial<CheckpointPolicy>;
 
 export interface CheckpointPolicyResponse {
   policy: CheckpointPolicy;
+  schedule?: CheckpointSchedule;
 }
 
 export interface CheckpointResponse {
   checkpoint: Checkpoint;
 }
+
+export interface RunSyncRequest {
+  checkpoint?: boolean;
+}
+
+export type SyncCheckpointKind = "automatic" | "additional";
+
+export type SyncCheckpointSkipReason =
+  | "not-versioned"
+  | "after-sync-off"
+  | "automatic-off"
+  | "not-due"
+  | "declined"
+  | "unchanged"
+  | "failed";
 
 export interface SyncJobResult {
   status: "ok";
@@ -177,4 +203,8 @@ export interface SyncJobResult {
   unchanged: boolean;
   outcome?: CheckpointJobOutcome;
   codeFailures?: CodeObjectFailure[];
+  manual?: boolean;
+  checkpointKind?: SyncCheckpointKind | null;
+  checkpointSkipped?: SyncCheckpointSkipReason | null;
+  nextAutomaticDueAt?: number | null;
 }

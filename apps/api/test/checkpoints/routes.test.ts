@@ -67,7 +67,7 @@ describe.skipIf(!mariadbAvailable())("checkpoint routes", () => {
 
     const empty = await json<CheckpointListResponse>(await call(viewer, base));
     expect(empty.checkpoints).toEqual([]);
-    expect(empty.policy).toEqual({ versioned: true, autoIntervalHours: 24, autoRetention: 7, checkpointOnSync: true });
+    expect(empty.policy).toEqual({ versioned: true, autoIntervalHours: 24, autoRetention: 7, checkpointOnSync: true, manualSyncCheckpoint: "ask" });
     const none = await json<CheckpointStatusResponse>(await call(viewer, `${base}/status`));
     expect(none.status.state).toBe("no-checkpoint");
 
@@ -144,7 +144,7 @@ describe.skipIf(!mariadbAvailable())("checkpoint routes", () => {
         body: JSON.stringify({ autoIntervalHours: 6, autoRetention: 3, checkpointOnSync: false, versioned: false }),
       }),
     );
-    expect(policy.policy).toEqual({ versioned: false, autoIntervalHours: 6, autoRetention: 3, checkpointOnSync: false });
+    expect(policy.policy).toEqual({ versioned: false, autoIntervalHours: 6, autoRetention: 3, checkpointOnSync: false, manualSyncCheckpoint: "ask" });
     expect((await call(fx.owner, `${base}/policy`, { method: "PUT", body: JSON.stringify({ autoRetention: 0 }) })).status).toBe(400);
     expect((await call(fx.owner, `${base}/policy`, { method: "PUT", body: JSON.stringify({ bogus: 1 }) })).status).toBe(400);
 

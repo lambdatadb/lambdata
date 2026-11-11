@@ -2,8 +2,8 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import mysql, { type RowDataPacket } from "mysql2/promise";
-import type { CodeObjectFailure, SyncJob } from "@lambdata/shared";
-import { checkpoints, databases, syncJobs } from "../db/queries";
+import type { CodeObjectFailure, SyncCheckpointKind, SyncCheckpointSkipReason, SyncJob } from "@lambdata/shared";
+import { audit, checkpoints, databases, syncBaselines, syncJobs, type BaselineTable } from "../db/queries";
 import { decryptSecret } from "../util/crypto";
 import { DiskSpaceError } from "../util/disk";
 import { captureCodeRecords, type CodeRecord } from "../mariadb/codeObjects";
@@ -29,7 +29,8 @@ import {
   staleRetryNote,
   type SafetyPoint,
 } from "../checkpoints/fencedSwap";
-import { noteSkippedForDisk } from "../checkpoints/scheduler";
+import { consumeAutomaticSlot, isScheduledCheckpointDue, nextAutomaticDueAt, noteSkippedForDisk } from "../checkpoints/scheduler";
+import { deliveredCodeHash, deliveredTables, dropBaseline, matchesBaseline, recordBaseline } from "../checkpoints/syncBaseline";
 import { diffAgainstLive } from "../checkpoints/status";
 import { collectMetricsFor } from "./metrics";
 
@@ -88,6 +89,16 @@ export interface SyncRunResult {
   unchanged: boolean | null;
   outcome: "done" | "done-with-errors";
   codeFailures: CodeObjectFailure[];
+  manual: boolean;
+  checkpointKind: SyncCheckpointKind | null;
+  checkpointSkipped: SyncCheckpointSkipReason | null;
+  nextAutomaticDueAt: number | null;
+}
+
+export interface SyncRunOptions {
+  manual?: boolean;
+  checkpoint?: boolean;
+  userId?: string | null;
 }
 
 interface Source {
@@ -317,9 +328,10 @@ async function checkLocalChanges(databaseId: string): Promise<LocalCheck> {
     tables: stats.tables.map((t) => ({ name: t.name, rowCount: t.rowCount, checksum: t.checksum })),
     capturedAt,
   };
+  const codeHash = stats.codeObjects > 0 ? await liveCodeHash(row.name) : null;
+  if (matchesBaseline(syncBaselines.get(databaseId), stats.tables, codeHash)) return { changed: false, expectLive };
   const base = row.baseCheckpointId ? checkpoints.byId(row.baseCheckpointId) : null;
   if (base && base.databaseId === databaseId && base.format !== "legacy") {
-    const codeHash = stats.codeObjects > 0 ? await liveCodeHash(row.name) : null;
     const diff = diffAgainstLive(base.id, checkpoints.entries(base.id), { stats, codeHash, computedAt: Date.now() });
     return { changed: diff.tables.length > 0 || diff.codeChanged, expectLive };
   }
@@ -327,7 +339,90 @@ async function checkLocalChanges(databaseId: string): Promise<LocalCheck> {
   return { changed: stats.tables.length > 0 || stats.codeObjects > 0, expectLive };
 }
 
-export async function runSync(databaseId: string, ctx: JobContext): Promise<SyncRunResult> {
+function whenText(at: number): string {
+  return `${new Date(at).toISOString().slice(0, 16).replace("T", " ")} UTC`;
+}
+
+function lastAutomaticHash(databaseId: string): string | null {
+  return checkpoints.listForDatabase(databaseId).find((c) => c.trigger === "scheduled" || c.trigger === "sync")?.shortHash ?? null;
+}
+
+interface CheckpointOutcome {
+  checkpointId: string | null;
+  unchanged: boolean | null;
+  checkpointKind: SyncCheckpointKind | null;
+  checkpointSkipped: SyncCheckpointSkipReason | null;
+  nextAutomaticDueAt: number | null;
+}
+
+async function checkpointAfterSync(
+  databaseId: string,
+  source: Source,
+  opts: SyncRunOptions,
+  ctx: JobContext,
+  secrets: string[],
+): Promise<CheckpointOutcome> {
+  const row = databases.byId(databaseId);
+  const policy = checkpoints.policy(databaseId);
+  const none = (skipped: SyncCheckpointSkipReason, stage: string | null): CheckpointOutcome => {
+    if (stage) ctx.stage(stage);
+    return { checkpointId: null, unchanged: null, checkpointKind: null, checkpointSkipped: skipped, nextAutomaticDueAt: nextAutomaticDueAt(databaseId) };
+  };
+  if (!row?.versioned) return none("not-versioned", null);
+  if (opts.manual) {
+    const wanted = opts.checkpoint ?? policy.manualSyncCheckpoint === "always";
+    if (!wanted) return none("declined", "Synced; no additional checkpoint was asked for");
+    ctx.stage("Saving an additional checkpoint after this manual sync");
+    try {
+      const made = await createCheckpoint(databaseId, {
+        trigger: "manual",
+        message: `After manual sync from ${source.host}/${source.database}`,
+        userId: opts.userId ?? null,
+        hooks: { warn: (m) => ctx.warn(m) },
+        retention: false,
+      });
+      if (!made.checkpointId) return { ...none("unchanged", "Synced; no additional checkpoint: nothing changed since the last checkpoint"), unchanged: true };
+      audit.log(opts.userId ?? null, "checkpoint.create", databaseId, { checkpointId: made.checkpointId, unchanged: false, verified: false, afterSync: true });
+      const hash = checkpoints.byId(made.checkpointId)?.shortHash ?? made.checkpointId;
+      ctx.stage(`Synced and saved additional checkpoint ${hash}`);
+      return { checkpointId: made.checkpointId, unchanged: false, checkpointKind: "additional", checkpointSkipped: null, nextAutomaticDueAt: nextAutomaticDueAt(databaseId) };
+    } catch (err) {
+      ctx.warn(`the sync succeeded but its additional checkpoint failed: ${cleanError(err, secrets)}`);
+      return none("failed", null);
+    }
+  }
+  if (!policy.checkpointOnSync) return none("after-sync-off", "Synced; the schedule takes this mirror's automatic checkpoints on its own clock");
+  if (policy.autoIntervalHours <= 0) return none("automatic-off", "Synced; automatic checkpoints are off for this mirror");
+  const startedAt = Date.now();
+  if (!isScheduledCheckpointDue(databaseId, startedAt)) {
+    const next = nextAutomaticDueAt(databaseId, startedAt);
+    const hash = lastAutomaticHash(databaseId);
+    return none(
+      "not-due",
+      `No checkpoint this time: the automatic checkpoint for this period${hash ? ` (${hash})` : ""} already exists; the next one is due after ${next === null ? "the interval" : whenText(next)}`,
+    );
+  }
+  ctx.stage("Recording the automatic checkpoint after this sync");
+  try {
+    const made = await createCheckpoint(databaseId, {
+      trigger: "sync",
+      message: `Synced from ${source.host}/${source.database}`,
+      hooks: { warn: (m) => ctx.warn(m) },
+    });
+    if (!made.checkpointId) {
+      consumeAutomaticSlot(databaseId, startedAt);
+      return { ...none("unchanged", "Synced; no automatic checkpoint: nothing changed since the last checkpoint"), unchanged: true };
+    }
+    const hash = checkpoints.byId(made.checkpointId)?.shortHash ?? made.checkpointId;
+    ctx.stage(`Synced and recorded automatic checkpoint ${hash}`);
+    return { checkpointId: made.checkpointId, unchanged: false, checkpointKind: "automatic", checkpointSkipped: null, nextAutomaticDueAt: nextAutomaticDueAt(databaseId) };
+  } catch (err) {
+    ctx.warn(`the sync succeeded but its checkpoint failed: ${cleanError(err, secrets)}`);
+    return none("failed", null);
+  }
+}
+
+export async function runSync(databaseId: string, ctx: JobContext, opts: SyncRunOptions = {}): Promise<SyncRunResult> {
   const job = syncJobs.byDatabaseId(databaseId);
   if (!job) throw new Error("no sync is configured for this database");
   const row = databases.byId(databaseId);
@@ -343,6 +438,7 @@ export async function runSync(databaseId: string, ctx: JobContext): Promise<Sync
     const staging = await createStagingSchema(row.name);
     let tables = 0;
     let code: CodeRecord[] = [];
+    let delivered: BaselineTable[] | null = null;
     try {
       if (source.kind === "mysql") {
         const loaded = await mysqlIntoStaging(source, staging, ctx);
@@ -351,6 +447,7 @@ export async function runSync(databaseId: string, ctx: JobContext): Promise<Sync
       } else {
         await postgresIntoStaging(source, staging, ctx);
       }
+      if (policyOn) delivered = await deliveredTables(staging);
     } catch (err) {
       await dropSchemaIfExists(staging).catch(() => {});
       throw err;
@@ -365,6 +462,7 @@ export async function runSync(databaseId: string, ctx: JobContext): Promise<Sync
       try {
         if (source.kind === "mysql") code = (await mysqlIntoStaging(source, currentStaging, ctx)).code;
         else await postgresIntoStaging(source, currentStaging, ctx);
+        if (policyOn) delivered = await deliveredTables(currentStaging);
       } catch (err) {
         await dropSchemaIfExists(currentStaging).catch(() => {});
         throw err;
@@ -455,31 +553,30 @@ export async function runSync(databaseId: string, ctx: JobContext): Promise<Sync
     const codeFailures: CodeObjectFailure[] = swap.failures.map(failureRecord);
     for (const w of swap.warnings) ctx.warn(w);
     invalidateWorkingCopyStatus(databaseId);
-    syncJobs.recordRun(databaseId, "ok", null);
-    let checkpointId: string | null = null;
-    let unchanged: boolean | null = null;
-    if (policyOn) {
-      ctx.stage("Recording a sync checkpoint");
+    if (policyOn && delivered) {
       try {
-        const after = await createCheckpoint(databaseId, {
-          trigger: "sync",
-          message: `Synced from ${source.host}/${source.database}`,
-          hooks: { warn: (m) => ctx.warn(m) },
-        });
-        checkpointId = after.checkpointId;
-        unchanged = after.unchanged;
+        recordBaseline(databaseId, delivered, await deliveredCodeHash(row.name, code, swap.failures));
       } catch (err) {
-        ctx.warn(`the sync succeeded but its checkpoint failed: ${cleanError(err, secrets)}`);
+        dropBaseline(databaseId);
+        ctx.warn(`the sync succeeded but LambData could not record what it delivered, so the next sync checks the mirror against its last checkpoint: ${cleanError(err, secrets)}`);
       }
+    } else {
+      dropBaseline(databaseId);
     }
+    syncJobs.recordRun(databaseId, "ok", null);
+    const after = await checkpointAfterSync(databaseId, source, opts, ctx, secrets);
     return {
       status: "ok",
       tables,
       preSyncCheckpointId,
-      checkpointId,
-      unchanged,
+      checkpointId: after.checkpointId,
+      unchanged: after.unchanged,
       outcome: codeFailures.length > 0 ? "done-with-errors" : "done",
       codeFailures,
+      manual: opts.manual === true,
+      checkpointKind: after.checkpointKind,
+      checkpointSkipped: after.checkpointSkipped,
+      nextAutomaticDueAt: after.nextAutomaticDueAt,
     };
   } catch (err) {
     const message = cleanError(err, secrets);
@@ -492,8 +589,10 @@ export async function runSync(databaseId: string, ctx: JobContext): Promise<Sync
   }
 }
 
-export function startSyncJob(databaseId: string, userId: string | null) {
-  return startJob({ kind: "sync.run", databaseId, userId }, (ctx) => runSync(databaseId, ctx));
+export function startSyncJob(databaseId: string, userId: string | null, opts: { manual?: boolean; checkpoint?: boolean } = {}) {
+  return startJob({ kind: "sync.run", databaseId, userId }, (ctx) =>
+    runSync(databaseId, ctx, { manual: opts.manual === true, checkpoint: opts.checkpoint, userId }),
+  );
 }
 
 export function runDueSyncs(now: number = Date.now()): string[] {

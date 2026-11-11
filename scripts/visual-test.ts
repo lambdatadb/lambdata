@@ -25,6 +25,8 @@ import { Recorder, capture, clickText, launch, openPage, settle, signIn } from "
 import { HttpError, type ApiClient } from "./lib/client";
 import { legacyCrmSqlite } from "./lib/fixtures";
 import { fixtureSetAside } from "../apps/web/src/pages/dev/setAsideFixtures";
+import { fixtureCheckpoints } from "../apps/web/src/pages/dev/jobFixtures";
+import { fixturePolicy, fixtureSchedule, fixtureSync, fixtureSyncResults, fixtureSyncedStatus } from "../apps/web/src/pages/dev/settingsFixtures";
 import { seedForNotifications, signatureMatches, startReceiver, waitForRequest, type Receiver } from "./lib/notify";
 import { ACCOUNTS, LAN_CLIENT, completeSetup, seed, type Account, type Seeded } from "./lib/seed";
 import { prepareRoot, readSetupToken, startStack, type Stack } from "./lib/stack";
@@ -972,6 +974,120 @@ async function polishTour(context: BrowserContext, base: string, admin: ApiClien
   await viewer.close();
 }
 
+async function rulesTour(context: BrowserContext, base: string, admin: ApiClient, databases: Database[], width: number): Promise<void> {
+  const mirror = databases.find((d) => d.kind === "mirror");
+  const standard = databases.find((d) => d.kind !== "mirror");
+  if (!mirror || !standard) throw new Error("the rules tour needs a mirror and a standard database");
+  const page = await openPage(context, recorder, width);
+  await installMockFetch(page);
+  await signIn(page, base, ACCOUNTS.admin.email, ACCOUNTS.admin.password);
+  const now = Date.now();
+  const checkpoints = fixtureCheckpoints.map((cp) => ({ ...cp, databaseId: mirror.id }));
+  const list = (policy = fixturePolicy) => ({
+    checkpoints,
+    policy,
+    storage: { checkpoints: checkpoints.length, storedBytes: 142_000, logicalBytes: 410_000 },
+    schedule: fixtureSchedule(now),
+  });
+  const sync = { ...fixtureSync, databaseId: mirror.id, lastRunAt: now - 20 * 60_000 };
+  const results = fixtureSyncResults(now);
+  const lastSync = mockJob({ id: "visual-last-sync", kind: "sync.run", status: "succeeded", databaseId: mirror.id, result: { ...results.notDue } });
+  const running = mockJob({ id: "visual-manual-sync", kind: "sync.run", status: "running", databaseId: mirror.id, progress: 0.4, stage: "Copying scores", startedAt: Date.now(), createdAt: Date.now() });
+  const done: Job = {
+    ...running,
+    status: "succeeded",
+    progress: 1,
+    finishedAt: Date.now(),
+    result: { ...results.additional, checkpointId: "cp_target" },
+  };
+  const mirrorRules: MockRule[] = [
+    { path: `/api/databases/${mirror.id}/checkpoints`, bodies: [list()] },
+    { path: `/api/databases/${mirror.id}/checkpoints/status`, bodies: [{ status: { ...fixtureSyncedStatus(mirror.id) } }] },
+    { path: `/api/databases/${mirror.id}/sync`, bodies: [{ sync }] },
+    { path: "/api/jobs", search: { databaseId: mirror.id, limit: "8", active: null }, bodies: [{ jobs: [lastSync] }] },
+  ];
+
+  await setMocks(page, mirrorRules);
+  await visit(page, base, `/databases/${mirror.id}/settings`);
+  await waitForText(page, "At a glance");
+  await shoot(page, "rules-settings-mirror", width);
+  await page.evaluate(() => {
+    const trigger = Array.from(document.querySelectorAll<HTMLElement>("[data-settings-form] button[role=combobox]")).find((el) => el.innerText.trim() === "One a day");
+    trigger?.setAttribute("data-tour-target", "interval");
+  });
+  await page.focus('[data-tour-target="interval"]');
+  await page.keyboard.press("Enter");
+  await page.waitForSelector("[role=option]", { timeout: 5_000 });
+  await settle(page, 200);
+  await page.keyboard.press("Home");
+  await page.keyboard.press("Enter");
+  await page.click('[data-settings-form] input[type="number"]', { count: 3 });
+  await page.keyboard.type("24");
+  await settle(page, 300);
+  await shoot(page, "rules-settings-mirror-edited", width);
+
+  await setMocks(page, [
+    { path: `/api/databases/${standard.id}/checkpoints`, bodies: [{ ...list({ ...fixturePolicy, versioned: false }), checkpoints: [] }] },
+  ]);
+  await visit(page, base, `/databases/${standard.id}/settings`);
+  await waitForText(page, "At a glance");
+  await shoot(page, "rules-settings-standard", width);
+
+  await visit(page, base, `/databases/${standard.id}`);
+  await waitForText(page, "Checkpoints");
+  await shoot(page, "rules-overview-standard", width);
+
+  await setMocks(page, mirrorRules);
+  await visit(page, base, `/databases/${mirror.id}/history`);
+  await waitForText(page, "synced, not in a checkpoint");
+  await shoot(page, "rules-history-mirror", width);
+
+  await setMocks(page, [
+    ...mirrorRules,
+    { method: "PUT", path: `/api/databases/${mirror.id}/checkpoints/policy`, bodies: [{ policy: { ...fixturePolicy, manualSyncCheckpoint: "always" }, schedule: fixtureSchedule(now) }] },
+    { method: "POST", path: `/api/databases/${mirror.id}/sync/run`, status: 202, bodies: [{ job: running }] },
+    { path: `/api/jobs/${running.id}`, bodies: [{ job: running }, { job: done }] },
+  ]);
+  await visit(page, base, `/databases/${mirror.id}/sync`);
+  await waitForText(page, "No checkpoint");
+  await shoot(page, "rules-sync-tab", width);
+  await clickText(page, "Sync now");
+  await page.waitForSelector('[role="dialog"]', { timeout: 10_000 });
+  await settle(page, 400);
+  await shoot(page, "rules-sync-prompt", width, false);
+  await page.click('[role="dialog"] button[role="checkbox"]');
+  await clickText(page, "Sync and checkpoint", '[role="dialog"] button');
+  await waitForText(page, "Additional checkpoint", 20_000);
+  await settle(page, 600);
+  await shoot(page, "rules-sync-result", width);
+  const seen = await page.evaluate(() => (window as MockWindow).__ldSeen ?? []);
+  const put = seen.find((r) => r.method === "PUT" && r.path.endsWith("/checkpoints/policy"));
+  const post = seen.find((r) => r.method === "POST" && r.path.endsWith("/sync/run"));
+  if (put?.body !== '{"manualSyncCheckpoint":"always"}') recorder.add("missing", `the prompt saved ${put?.body ?? "nothing"}`);
+  if (post?.body !== '{"checkpoint":true}' || post.contentType !== "application/json") recorder.add("missing", `Sync now sent ${post?.body ?? "nothing"}`);
+  await page.close();
+
+  const viewer = await openPage(context, recorder, width);
+  await installMockFetch(viewer);
+  await signIn(viewer, base, ACCOUNTS.viewer.email, ACCOUNTS.viewer.password);
+  await setMocks(viewer, mirrorRules);
+  await visit(viewer, base, `/databases/${mirror.id}/settings`);
+  await waitForText(viewer, "At a glance");
+  await shoot(viewer, "rules-settings-viewer", width);
+  await viewer.close();
+
+  if (width === widths[widths.length - 1]) {
+    const listed = await admin.raw("GET", `/api/databases/${mirror.id}/checkpoints`);
+    const body = listed.ok ? ((await listed.json()) as { schedule?: unknown; policy?: { manualSyncCheckpoint?: unknown } }) : null;
+    log(`real GET checkpoints: ${listed.status}; schedule ${body?.schedule ? "present" : "absent"}; manualSyncCheckpoint ${String(body?.policy?.manualSyncCheckpoint)}`);
+    const put = await admin.raw("PUT", `/api/databases/${mirror.id}/checkpoints/policy`, {
+      body: JSON.stringify({ manualSyncCheckpoint: "never" }),
+      headers: { "Content-Type": "application/json" },
+    });
+    log(`real PUT policy with manualSyncCheckpoint: ${put.status} ${put.ok ? "" : await put.text()}`);
+  }
+}
+
 let stack: Stack | null = null;
 let receiver: Receiver | null = null;
 let exitCode = 0;
@@ -992,7 +1108,7 @@ try {
 
   const admin = await completeSetup(stack.apiUrl, join(root, "data"), setupToken, log);
   const fullSeed = tours.has("base") || tours.has("closeout");
-  const notifyTours = tours.has("notifications") || tours.has("notifications-real");
+  const notifyTours = tours.has("notifications") || tours.has("notifications-real") || tours.has("rules");
   const data = fullSeed ? await seed(admin, stack.apiUrl, root, stack.bootedAt, log) : null;
   const notifyDatabases = data ? [data.storefront, data.fieldNotes, data.replica] : notifyTours ? await seedForNotifications(admin, log) : [];
   let realNotifications = false;
@@ -1034,6 +1150,12 @@ try {
         const closeoutContext = await browser.createBrowserContext();
         await closeoutTour(closeoutContext, stack.webUrl, data, admin, width);
         await closeoutContext.close();
+      }
+
+      if (tours.has("rules")) {
+        const rulesContext = await browser.createBrowserContext();
+        await rulesTour(rulesContext, stack.webUrl, admin, notifyDatabases, width);
+        await rulesContext.close();
       }
 
       if (tours.has("polish")) {
