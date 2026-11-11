@@ -23,6 +23,7 @@ type DestinationRow = {
   events: string;
   database_ids: string | null;
   icon_url: string | null;
+  skip_unchanged?: number | null;
   last_success_at: number | null;
   last_failure_at: number | null;
   last_error: string | null;
@@ -60,6 +61,7 @@ export interface DestinationRecord {
   events: NotificationEventType[];
   databaseIds: string[] | null;
   iconUrl: string | null;
+  skipUnchanged: boolean;
   createdByUserId: string | null;
   createdAt: number;
   updatedAt: number;
@@ -69,6 +71,7 @@ export interface DestinationMatch {
   id: string;
   events: Set<string>;
   databaseIds: Set<string> | null;
+  skipUnchanged: boolean;
 }
 
 export interface DeliveryRecord {
@@ -124,6 +127,7 @@ function toPublic(r: DestinationRow): NotificationDestination {
     events: (parseList(r.events) ?? []) as NotificationEventType[],
     databaseIds: parseList(r.database_ids),
     iconUrl: r.icon_url,
+    skipUnchanged: r.skip_unchanged === 1,
     health: healthOf(r),
     lastSuccessAt: r.last_success_at,
     lastFailureAt: r.last_failure_at,
@@ -149,6 +153,7 @@ function toRecord(r: DestinationRow): DestinationRecord {
     events: (parseList(r.events) ?? []) as NotificationEventType[],
     databaseIds: parseList(r.database_ids),
     iconUrl: r.icon_url,
+    skipUnchanged: r.skip_unchanged === 1,
     createdByUserId: r.created_by_user_id,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
@@ -188,7 +193,7 @@ function toDeliveryRecord(r: DeliveryRow): DeliveryRecord {
 export type DestinationPatch = Partial<
   Pick<
     DestinationRecord,
-    "name" | "enabled" | "configEnc" | "target" | "hasSecret" | "headerNames" | "ntfyPriority" | "events" | "databaseIds" | "iconUrl"
+    "name" | "enabled" | "configEnc" | "target" | "hasSecret" | "headerNames" | "ntfyPriority" | "events" | "databaseIds" | "iconUrl" | "skipUnchanged"
   >
 >;
 
@@ -203,10 +208,11 @@ const PATCH_COLUMNS: Record<keyof DestinationPatch, string> = {
   events: "events",
   databaseIds: "database_ids",
   iconUrl: "icon_url",
+  skipUnchanged: "skip_unchanged",
 };
 
 function patchValue(key: keyof DestinationPatch, value: unknown): string | number | null {
-  if (key === "enabled" || key === "hasSecret") return value ? 1 : 0;
+  if (key === "enabled" || key === "hasSecret" || key === "skipUnchanged") return value ? 1 : 0;
   if (key === "headerNames" || key === "events") return JSON.stringify(value ?? []);
   if (key === "databaseIds") return value === null || value === undefined ? null : JSON.stringify(value);
   return (value ?? null) as string | number | null;
@@ -231,18 +237,23 @@ export const notificationDestinations = {
   },
   enabledMatches(): DestinationMatch[] {
     const rows = db
-      .query("SELECT id, events, database_ids FROM notification_destinations WHERE enabled = 1")
-      .all() as Pick<DestinationRow, "id" | "events" | "database_ids">[];
+      .query("SELECT id, events, database_ids, skip_unchanged FROM notification_destinations WHERE enabled = 1")
+      .all() as Pick<DestinationRow, "id" | "events" | "database_ids" | "skip_unchanged">[];
     return rows.map((r) => {
       const ids = parseList(r.database_ids);
-      return { id: r.id, events: new Set(parseList(r.events) ?? []), databaseIds: ids === null ? null : new Set(ids) };
+      return {
+        id: r.id,
+        events: new Set(parseList(r.events) ?? []),
+        databaseIds: ids === null ? null : new Set(ids),
+        skipUnchanged: r.skip_unchanged === 1,
+      };
     });
   },
   insert(rec: DestinationRecord): void {
     db.query(
       `INSERT INTO notification_destinations(id, name, kind, enabled, config_enc, target, has_secret, header_names,
-        ntfy_priority, events, database_ids, icon_url, consecutive_failures, created_by_user_id, created_at, updated_at)
-       VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`,
+        ntfy_priority, events, database_ids, icon_url, skip_unchanged, consecutive_failures, created_by_user_id, created_at, updated_at)
+       VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`,
     ).run(
       rec.id,
       rec.name,
@@ -256,6 +267,7 @@ export const notificationDestinations = {
       JSON.stringify(rec.events),
       rec.databaseIds === null ? null : JSON.stringify(rec.databaseIds),
       rec.iconUrl,
+      rec.skipUnchanged ? 1 : 0,
       rec.createdByUserId,
       rec.createdAt,
       rec.updatedAt,

@@ -21,6 +21,7 @@ notificationDestinations.insert({
   events: ["user.created"],
   databaseIds: null,
   iconUrl: null,
+  skipUnchanged: false,
   createdByUserId: null,
   createdAt: now,
   updatedAt: now,

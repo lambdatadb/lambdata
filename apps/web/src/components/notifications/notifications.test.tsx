@@ -296,6 +296,7 @@ test("create requests carry exactly the chosen config for each kind", () => {
     events: fixtureDefaultEvents,
     databaseIds: null,
     iconUrl: null,
+    skipUnchanged: false,
   });
   const webhook = createRequest({
     ...newDraft("webhook", fixtureCatalog),
@@ -360,7 +361,7 @@ test("a failing destination is marked amber with its last error, a new one invit
   expect(t).toContain("last tried 12m ago");
   expect(t).toContain("Storefront, Ledger");
   expect(t).toContain("Signed · 1 header");
-  expect(t).toContain("6 of 25 events");
+  expect(t).toContain("6 of 28 events");
 
   const fresh = text(card(phone));
   expect(fresh).toContain("Nothing delivered yet. Send a test to check that messages arrive.");
@@ -431,7 +432,7 @@ test("the event picker groups the catalog, selects whole groups and marks routin
   expect(t).toContain("Scheduled checkpoints send one message per database every time they run.");
   expect(t).toContain("Use defaults");
   const all = render(<EventPicker catalog={fixtureCatalog} value={fixtureCatalog.events.map((e) => e.type)} onChange={() => undefined} />);
-  expect(text(all)).toContain("25 of 25 events");
+  expect(text(all)).toContain("28 of 28 events");
   expect(text(all)).toContain("3/3");
 });
 
@@ -535,4 +536,34 @@ test("requests go to the contract's routes as JSON", async () => {
   } finally {
     globalThis.fetch = original;
   }
+});
+
+test("the destination dialog has the skip-unchanged switch, off by default, and saves it only when it changes", () => {
+  const fresh = form(newDraft("discord", fixtureCatalog));
+  const t = text(fresh);
+  expect(t).toContain("Skip sync messages when nothing changed");
+  expect(t).toContain("Failed syncs, recoveries and everything else still arrive.");
+  expect(fresh).toContain('data-skip-unchanged="off"');
+  expect(newDraft("discord", fixtureCatalog).skipUnchanged).toBe(false);
+  expect(createRequest({ ...newDraft("discord", fixtureCatalog), url: "https://discord.com/api/webhooks/1/a", skipUnchanged: true }).skipUnchanged).toBe(true);
+
+  expect(draftFrom(phone).skipUnchanged).toBe(true);
+  expect(form(draftFrom(phone), { mode: "edit", original: phone })).toContain('data-skip-unchanged="on"');
+  expect(updateRequest(draftFrom(phone), phone)).toEqual({});
+  expect(updateRequest({ ...draftFrom(phone), skipUnchanged: false }, phone)).toEqual({ skipUnchanged: false });
+  expect(updateRequest({ ...draftFrom(ops), skipUnchanged: true }, ops)).toEqual({ skipUnchanged: true });
+  expect(draftFrom({ ...ops, skipUnchanged: undefined }).skipUnchanged).toBe(false);
+});
+
+test("a destination card says when it skips syncs that changed nothing", () => {
+  expect(text(card(phone))).toContain("Skips syncs that changed nothing");
+  expect(text(card(ops))).not.toContain("Skips syncs that changed nothing");
+});
+
+test("the event picker shows the access token group", () => {
+  const t = text(render(<EventPicker catalog={fixtureCatalog} value={fixtureDefaultEvents} onChange={() => undefined} />));
+  expect(t).toContain("Access tokens");
+  expect(t).toContain("Approval needed");
+  expect(fixtureDefaultEvents).toContain("approval.requested");
+  expect(fixtureDefaultEvents).not.toContain("token.created");
 });

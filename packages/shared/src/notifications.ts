@@ -1,6 +1,8 @@
+import type { TableRowChange } from "./checkpoints";
+
 export type NotificationKind = "discord" | "slack" | "webhook" | "ntfy";
 
-export type NotificationGroup = "databases" | "checkpoints" | "mirrors" | "imports" | "access" | "health";
+export type NotificationGroup = "databases" | "checkpoints" | "mirrors" | "imports" | "access" | "agents" | "health";
 
 export type NotificationSeverity = "info" | "success" | "warning" | "error";
 
@@ -25,6 +27,9 @@ export type NotificationEventType =
   | "data_api.opened"
   | "data_api.closed"
   | "network.policy_changed"
+  | "token.created"
+  | "token.revoked"
+  | "approval.requested"
   | "mariadb.down"
   | "mariadb.recovered"
   | "disk.low"
@@ -93,6 +98,7 @@ export interface NotificationDestination {
   events: NotificationEventType[];
   databaseIds: string[] | null;
   iconUrl: string | null;
+  skipUnchanged?: boolean;
   health: NotificationDestinationHealth;
   lastSuccessAt: number | null;
   lastFailureAt: number | null;
@@ -109,6 +115,7 @@ export type CreateNotificationDestinationRequest = NotificationDestinationConfig
   events: NotificationEventType[];
   databaseIds?: string[] | null;
   iconUrl?: string | null;
+  skipUnchanged?: boolean;
 };
 
 export type NotificationDestinationConfigPatch =
@@ -123,6 +130,7 @@ export interface UpdateNotificationDestinationRequest {
   events?: NotificationEventType[];
   databaseIds?: string[] | null;
   iconUrl?: string | null;
+  skipUnchanged?: boolean;
   config?: NotificationDestinationConfigPatch;
 }
 
@@ -174,6 +182,7 @@ export interface NotificationWebhookPayload {
   actor: { displayName: string } | null;
   database: { id: string; name: string; displayName: string } | null;
   data: Record<string, string | number | boolean | null>;
+  changes?: { tables: TableRowChange[]; truncated: boolean } | null;
   link: string | null;
   iconUrl: string | null;
 }

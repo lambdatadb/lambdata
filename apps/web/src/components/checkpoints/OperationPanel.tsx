@@ -5,6 +5,7 @@ import type { Checkpoint, CheckpointCreateJobResult, CheckpointRestoreJobResult,
 import { Button } from "../ui/Button";
 import { SimpleTooltip } from "../ui/Tooltip";
 import { JobProgress } from "../jobs/JobProgress";
+import { SyncChanges, readSyncChanges } from "../sync/SyncChanges";
 import { isJobActive, jobKindLabel } from "../../lib/jobs";
 import { createLimitations, createVerified, isCodeRefusal, jobCodeFailures, jobState, refusedTargetHash } from "../../lib/jobOutcome";
 import { ForceRollbackDialog } from "./ForceRollbackDialog";
@@ -130,10 +131,13 @@ export function operationSuccess(job: Job, meta: TrackedJobMeta | null, byId: Ma
         ? "Synced; no data changed."
         : "Synced.";
     return (
-      <p>
-        {lead}
-        {line && <> {line.text.endsWith(".") ? line.text : `${line.text}.`}</>}
-      </p>
+      <>
+        <p>
+          {lead}
+          {line && <> {line.text.endsWith(".") ? line.text : `${line.text}.`}</>}
+        </p>
+        <SyncChanges changes={readSyncChanges(r.changes)} />
+      </>
     );
   }
   return null;

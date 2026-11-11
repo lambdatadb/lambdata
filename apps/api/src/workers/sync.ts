@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import mysql, { type RowDataPacket } from "mysql2/promise";
-import type { CodeObjectFailure, SyncCheckpointKind, SyncCheckpointSkipReason, SyncJob } from "@lambdata/shared";
+import type { CodeObjectFailure, SyncChangeSummary, SyncCheckpointKind, SyncCheckpointSkipReason, SyncJob } from "@lambdata/shared";
 import { audit, checkpoints, databases, syncBaselines, syncJobs, type BaselineTable } from "../db/queries";
 import { decryptSecret } from "../util/crypto";
 import { DiskSpaceError } from "../util/disk";
@@ -33,6 +33,7 @@ import { consumeAutomaticSlot, isScheduledCheckpointDue, nextAutomaticDueAt, not
 import { deliveredCodeHash, deliveredTables, dropBaseline, matchesBaseline, recordBaseline } from "../checkpoints/syncBaseline";
 import { diffAgainstLive } from "../checkpoints/status";
 import { collectMetricsFor } from "./metrics";
+import { changeBudget, changeLimits, syncChanges, type ChangeBudget, type ChangeHints } from "../sync/changes";
 
 export const SYNC_TIMEOUT_MS = 2 * 60 * 60 * 1000;
 const CONNECT_TIMEOUT_MS = 15_000;
@@ -93,6 +94,7 @@ export interface SyncRunResult {
   checkpointKind: SyncCheckpointKind | null;
   checkpointSkipped: SyncCheckpointSkipReason | null;
   nextAutomaticDueAt: number | null;
+  changes: SyncChangeSummary | null;
 }
 
 export interface SyncRunOptions {
@@ -452,6 +454,18 @@ export async function runSync(databaseId: string, ctx: JobContext, opts: SyncRun
       await dropSchemaIfExists(staging).catch(() => {});
       throw err;
     }
+    let changes: SyncChangeSummary | null = null;
+    let budget: ChangeBudget | null = null;
+    const measure = async (hints: ChangeHints): Promise<void> => {
+      ctx.stage("Comparing the new copy with the mirror");
+      try {
+        budget ??= changeBudget(changeLimits());
+        changes = await syncChanges.measure(row.name, currentStaging, { hints, budget });
+      } catch (err) {
+        changes = null;
+        console.warn(`[sync] could not measure what the sync of ${row.name} changed:`, cleanError(err, secrets).slice(0, 300));
+      }
+    };
     let preSyncCheckpointId: string | null = null;
     const subject = `The sync of ${row.name}`;
     const phase = new PhaseTracker();
@@ -467,6 +481,7 @@ export async function runSync(databaseId: string, ctx: JobContext, opts: SyncRun
         await dropSchemaIfExists(currentStaging).catch(() => {});
         throw err;
       }
+      await measure({ staging: delivered });
     };
     const swapIn = (expectLive: ExpectLive | undefined, safetyCheckpointId: string | null): Promise<SwapResult> => {
       ctx.stage("Swapping the new data in");
@@ -528,10 +543,12 @@ export async function runSync(databaseId: string, ctx: JobContext, opts: SyncRun
     let swap: SwapResult;
     try {
       if (!policyOn) {
+        await measure({});
         swap = await swapIn(undefined, null);
       } else {
         ctx.stage("Checking the mirror for local changes");
         const check = await checkLocalChanges(databaseId);
+        await measure({ live: check.expectLive.tables, staging: delivered });
         if (check.changed) {
           swap = await fencedSwap();
         } else {
@@ -577,6 +594,7 @@ export async function runSync(databaseId: string, ctx: JobContext, opts: SyncRun
       checkpointKind: after.checkpointKind,
       checkpointSkipped: after.checkpointSkipped,
       nextAutomaticDueAt: after.nextAutomaticDueAt,
+      changes,
     };
   } catch (err) {
     const message = cleanError(err, secrets);

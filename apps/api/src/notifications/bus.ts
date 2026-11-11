@@ -14,7 +14,7 @@ export interface NotificationHooks {
   snapshotUnconverted?: (snapshotId: string, databaseId: string) => void;
 }
 
-const WATCHED_PREFIXES = ["db.", "checkpoint.", "user.", "data_api.access.", "network.policy."];
+const WATCHED_PREFIXES = ["db.", "checkpoint.", "user.", "data_api.access.", "network.policy.", "access_token.", "approval."];
 
 let hooks: NotificationHooks = {};
 

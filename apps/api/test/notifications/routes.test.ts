@@ -83,9 +83,15 @@ describe("notification routes", () => {
 
   test("the catalog lists every group and event with defaults and the default icon", async () => {
     const res = await json<NotificationCatalogResponse>(await call("GET", "/api/notifications/events"));
-    expect(res.groups.map((g) => g.group)).toEqual(["databases", "checkpoints", "mirrors", "imports", "access", "health"]);
-    expect(res.events).toHaveLength(25);
-    expect(res.events.filter((e) => !e.defaultOn).map((e) => e.type).sort()).toEqual(["checkpoint.auto_created", "disk.recovered", "sync.finished"]);
+    expect(res.groups.map((g) => g.group)).toEqual(["databases", "checkpoints", "mirrors", "imports", "access", "agents", "health"]);
+    expect(res.events).toHaveLength(28);
+    expect(res.events.filter((e) => !e.defaultOn).map((e) => e.type).sort()).toEqual([
+      "checkpoint.auto_created",
+      "disk.recovered",
+      "sync.finished",
+      "token.created",
+      "token.revoked",
+    ]);
     expect(res.defaultIconUrl).toBe(DEFAULT_ICON_URL);
     for (const e of res.events) {
       expect(e.label.length).toBeGreaterThan(0);
@@ -125,6 +131,7 @@ describe("notification routes", () => {
       events: ["database.created", "checkpoint.created"],
       databaseIds: null,
       iconUrl: null,
+      skipUnchanged: false,
       health: "new",
       lastSuccessAt: null,
       lastFailureAt: null,
@@ -145,6 +152,13 @@ describe("notification routes", () => {
       await call("PATCH", `/api/notifications/destinations/${created.id}`, { config: { url: "https://discordapp.com/api/webhooks/9/zz-Q1w2" } }),
     );
     expect(moved.destination.target).toBe("discordapp.com/…Q1w2");
+    const quiet = await json<NotificationDestinationResponse>(
+      await call("PATCH", `/api/notifications/destinations/${created.id}`, { skipUnchanged: true }),
+    );
+    expect(quiet.destination).toMatchObject({ skipUnchanged: true, name: "Renamed" });
+    expect((await call("PATCH", `/api/notifications/destinations/${created.id}`, { skipUnchanged: "yes" })).status).toBe(400);
+    const skipping = await create({ kind: "discord", name: "Quiet", events: ["sync.finished"], skipUnchanged: true, config: { url: "https://discord.com/api/webhooks/3/q" } });
+    expect(skipping.skipUnchanged).toBe(true);
 
     const ntfy = await create({ kind: "ntfy", name: "Phone", events: [], config: { topic: "abcdef-secret-topic", token: "tk_1", priority: 4 } });
     expect(ntfy).toMatchObject({ target: "ntfy.sh/ab…", hasSecret: true, ntfyPriority: 4 });

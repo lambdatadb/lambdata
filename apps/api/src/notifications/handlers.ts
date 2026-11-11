@@ -1,5 +1,6 @@
-import type { AccessPolicy, Checkpoint, CheckpointTrigger, Job } from "@lambdata/shared";
+import type { AccessPolicy, Checkpoint, CheckpointDiff, CheckpointTrigger, Job } from "@lambdata/shared";
 import { checkpoints, imports, users } from "../db/queries";
+import { diffEntries } from "../checkpoints/status";
 import { notificationState } from "../db/queries/notifications";
 import { healthCheck, mariadbExpected, mariadbState, type ReadyReason } from "../mariadb/controller";
 import { diskStatus, formatBytes } from "../util/disk";
@@ -18,9 +19,11 @@ import {
   personName,
   rememberUser,
   subjectOf,
+  tokenActorName,
   type DatabaseRef,
 } from "./emit";
 import { cleanUserText, type EventField } from "./format";
+import { describeSyncChanges, syncChangeData, syncChangeList, syncUnchanged } from "./syncChanges";
 
 const REFUSAL_MEMORY_MS = 6 * 60 * 60 * 1000;
 const DISK_RECOVER_MARGIN = 0.05;
@@ -63,6 +66,51 @@ function sizeFacts(cp: Checkpoint): string {
   if (cp.tableCount !== null) parts.push(count(cp.tableCount, "table"));
   if (cp.rowCount !== null) parts.push(count(cp.rowCount, "row"));
   return parts.length > 0 ? ` It holds ${parts.join(" and ")}.` : "";
+}
+
+function signed(n: number): string {
+  return `${n > 0 ? "+" : n < 0 ? "-" : ""}${Math.abs(n).toLocaleString("en-US")}`;
+}
+
+function sinceParent(cp: Checkpoint): { parent: Checkpoint; diff: CheckpointDiff } | null {
+  try {
+    if (!cp.parentId || cp.format === "legacy") return null;
+    const parent = checkpoints.byId(cp.parentId);
+    if (!parent || parent.format === "legacy" || parent.databaseId !== cp.databaseId) return null;
+    return { parent, diff: diffEntries(parent.id, cp.id, checkpoints.entries(parent.id), checkpoints.entries(cp.id)) };
+  } catch {
+    return null;
+  }
+}
+
+function changeFacts(since: { parent: Checkpoint; diff: CheckpointDiff } | null): string {
+  if (!since) return "";
+  const { parent, diff } = since;
+  const n = diff.tables.length;
+  if (n === 0) {
+    return diff.codeChanged
+      ? ` Since checkpoint ${parent.shortHash} no table changed; views, triggers or routines did.`
+      : ` Nothing changed since checkpoint ${parent.shortHash}.`;
+  }
+  const rows = diff.rowDelta === null ? "" : diff.rowDelta === 0 ? ", same number of rows" : `, ${signed(diff.rowDelta)} ${Math.abs(diff.rowDelta) === 1 ? "row" : "rows"}`;
+  return ` Since checkpoint ${parent.shortHash}: ${count(n, "table")} changed${rows}.`;
+}
+
+function changeField(since: { parent: Checkpoint; diff: CheckpointDiff } | null): string | null {
+  if (!since) return null;
+  const n = since.diff.tables.length;
+  const rows = since.diff.rowDelta === null || since.diff.rowDelta === 0 ? "" : `, ${signed(since.diff.rowDelta)} rows`;
+  return `${count(n, "table")}${rows}`;
+}
+
+function changeData(since: { parent: Checkpoint; diff: CheckpointDiff } | null): Record<string, string | number | boolean | null> {
+  if (!since) return { previousCheckpointId: null, tablesChanged: null, rowDelta: null };
+  return {
+    previousCheckpointId: since.parent.id,
+    tablesChanged: since.diff.tables.length,
+    rowDelta: since.diff.rowDelta,
+    codeChanged: since.diff.codeChanged,
+  };
 }
 
 function codeObjects(n: number): string {
@@ -134,12 +182,13 @@ function onCheckpointCreated(note: AuditNote): void {
     const db = databaseRef(note.target);
     if (!cp || !db) return null;
     const actor = actorOf(note.userId);
+    const since = sinceParent(cp);
     return {
       title: `Checkpoint made: ${checkpointLabel(cp)} (${cp.shortHash})`,
-      message: `${subjectOf(actor)} made a checkpoint of ${db.displayName}.${sizeFacts(cp)}`,
+      message: `${subjectOf(actor)} made a checkpoint of ${db.displayName}.${sizeFacts(cp)}${changeFacts(since)}`,
       actor,
       database: db,
-      fields: fieldsOf(["Database", db.displayName], ["Checkpoint", cp.shortHash], ["By", actor?.displayName]),
+      fields: fieldsOf(["Database", db.displayName], ["Checkpoint", cp.shortHash], ["Changed", changeField(since)], ["By", actor?.displayName]),
       data: {
         ...dbData(db),
         checkpointId: cp.id,
@@ -147,6 +196,7 @@ function onCheckpointCreated(note: AuditNote): void {
         tables: cp.tableCount,
         rows: cp.rowCount,
         verified: d.verified === true,
+        ...changeData(since),
       },
       linkPath: dbPath(db, "history", cp.id),
       occurredAt: cp.createdAt,
@@ -340,6 +390,71 @@ function onPolicyChanged(note: AuditNote): void {
   });
 }
 
+const PRESET_LABELS: Record<string, string> = { read_only: "Read only", builder: "Builder", admin: "Admin" };
+
+function tokenPath(id: string | null): string {
+  return id ? `/access-tokens/${encodeURIComponent(id)}` : "/access-tokens";
+}
+
+function tokenName(raw: unknown): string | null {
+  return cleanUserText(raw, 100) || null;
+}
+
+function onTokenCreated(note: AuditNote): void {
+  const d = obj(note.details);
+  emit("token.created", null, () => {
+    const actor = actorOf(note.userId);
+    const name = tokenName(d.name);
+    const preset = str(d.preset);
+    const presetLabel = preset ? (PRESET_LABELS[preset] ?? null) : null;
+    return {
+      title: name ? `Access token created: ${name}` : "Access token created",
+      message: `${subjectOf(actor)} created the access token ${name ?? "without a name"}${presetLabel ? ` with the ${presetLabel} preset` : ""}. Whatever holds it can now use the management API within what that allows.`,
+      actor,
+      fields: fieldsOf(["Token", name], ["Preset", presetLabel], ["By", actor?.displayName]),
+      data: { tokenId: note.target, preset: presetLabel ? preset : null },
+      linkPath: tokenPath(note.target),
+    };
+  });
+}
+
+function onTokenRevoked(note: AuditNote): void {
+  const d = obj(note.details);
+  emit("token.revoked", null, () => {
+    const actor = actorOf(note.userId);
+    const name = tokenName(d.name);
+    return {
+      title: name ? `Access token revoked: ${name}` : "Access token revoked",
+      message: `${subjectOf(actor)} revoked the access token ${name ?? "without a name"}. Anything still using it is refused from now on.`,
+      actor,
+      fields: fieldsOf(["Token", name], ["By", actor?.displayName]),
+      data: { tokenId: note.target },
+      linkPath: tokenPath(note.target),
+    };
+  });
+}
+
+function onApprovalRequested(note: AuditNote): void {
+  const d = obj(note.details);
+  const databaseId = str(d.databaseId);
+  emit("approval.requested", databaseId, () => {
+    const actor = str(d.tokenName) ? { displayName: tokenActorName(d.tokenName) } : actorOf(note.userId);
+    const who = actor?.displayName ?? "An access token";
+    const summary = cleanUserText(d.summary, 150) || cleanUserText(d.action, 80) || "an action";
+    const action = cleanUserText(d.action, 80) || null;
+    const db = databaseId ? databaseRef(databaseId) : null;
+    return {
+      title: `Approval needed: ${summary}`,
+      message: `${who} is waiting for approval to do this: ${summary}${db ? ` (database ${db.displayName})` : ""}. Nothing happens until an admin approves or declines it in the console.`,
+      actor,
+      database: db,
+      fields: fieldsOf(["Token", who], ["Action", action], ["Database", db?.displayName]),
+      data: { approvalId: note.target, tokenId: str(d.tokenId), action, ...dbData(db) },
+      linkPath: "/access-tokens/approvals",
+    };
+  });
+}
+
 export function handleAudit(note: AuditNote): void {
   switch (note.action) {
     case "db.create":
@@ -375,6 +490,12 @@ export function handleAudit(note: AuditNote): void {
     case "network.policy.update":
     case "network.policy.reset_by_env":
       return onPolicyChanged(note);
+    case "access_token.create":
+      return onTokenCreated(note);
+    case "access_token.revoke":
+      return onTokenRevoked(note);
+    case "approval.request":
+      return onApprovalRequested(note);
   }
 }
 
@@ -400,15 +521,25 @@ function autoCheckpoints(job: Job, ids: unknown[]): void {
       const db = databaseRef(job.databaseId);
       if (!db) return null;
       const label = AUTO_LABELS[cp.trigger] ?? { title: "Automatic checkpoint", text: (n: string) => `LambData made a checkpoint of ${n}.` };
+      const since = sinceParent(cp);
       return {
         title: `${label.title}: ${db.displayName} (${cp.shortHash})`,
-        message: `${label.text(db.displayName)}${sizeFacts(cp)}`,
+        message: `${label.text(db.displayName)}${sizeFacts(cp)}${changeFacts(since)}`,
         actor: null,
         database: db,
-        fields: fieldsOf(["Database", db.displayName], ["Checkpoint", cp.shortHash]),
-        data: { ...dbData(db), checkpointId: cp.id, hash: cp.shortHash, trigger: cp.trigger, tables: cp.tableCount, rows: cp.rowCount },
+        fields: fieldsOf(["Database", db.displayName], ["Checkpoint", cp.shortHash], ["Changed", changeField(since)]),
+        data: {
+          ...dbData(db),
+          checkpointId: cp.id,
+          hash: cp.shortHash,
+          trigger: cp.trigger,
+          tables: cp.tableCount,
+          rows: cp.rowCount,
+          ...changeData(since),
+        },
         linkPath: dbPath(db, "history", cp.id),
         occurredAt: cp.createdAt,
+        unchanged: since !== null && since.diff.tables.length === 0 && !since.diff.codeChanged,
       };
     });
   }
@@ -472,14 +603,30 @@ function onSyncFinished(job: Job): void {
     const copied = tables !== null && tables > 0 ? ` and copied ${count(tables, "table")}` : "";
     const errors = withErrors ? ` It finished with errors: ${codeObjects(Math.max(1, failures))} could not be created.` : "";
     const lead = actor ? `${actor.displayName} synced ${db.displayName} from its source` : `${db.displayName} synced from its source`;
+    const changes = describeSyncChanges(r.changes);
     return {
       title: `${withErrors ? "Sync finished with errors" : "Sync finished"}: ${db.displayName}`,
-      message: `${lead}${copied}.${errors}`,
+      message: `${lead}${copied}.${errors}${changes.text ? ` ${changes.text}` : ""}`,
       actor,
       database: db,
-      fields: fieldsOf(["Mirror", db.displayName], ["Tables", tables !== null ? String(tables) : null], ["By", actor?.displayName]),
-      data: { ...dbData(db), tables, outcome: withErrors ? "done-with-errors" : "done", codeFailures: failures, jobId: job.id },
+      fields: fieldsOf(
+        ["Mirror", db.displayName],
+        ["Tables", tables !== null ? String(tables) : null],
+        ["Changed", changes.changedField],
+        ["Rows", changes.rowsField],
+        ["By", actor?.displayName],
+      ),
+      data: {
+        ...dbData(db),
+        tables,
+        outcome: withErrors ? "done-with-errors" : "done",
+        codeFailures: failures,
+        jobId: job.id,
+        ...syncChangeData(r.changes),
+      },
+      changes: syncChangeList(r.changes),
       linkPath: dbPath(db, "sync"),
+      unchanged: !withErrors && syncUnchanged(r.changes),
     };
   });
   autoCheckpoints(job, [r.preSyncCheckpointId, r.checkpointId]);

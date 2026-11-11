@@ -1,6 +1,7 @@
 import { createHmac } from "node:crypto";
 import type {
   NotificationEventType,
+  TableRowChange,
   NotificationGroup,
   NotificationSeverity,
   NotificationWebhookPayload,
@@ -25,6 +26,7 @@ export interface NotificationEvent {
   database: { id: string; name: string; displayName: string } | null;
   fields: EventField[];
   data: Record<string, string | number | boolean | null>;
+  changes?: { tables: TableRowChange[]; truncated: boolean } | null;
   link: string | null;
 }
 
@@ -168,7 +170,7 @@ export function ntfyBody(
 }
 
 export function webhookPayload(event: NotificationEvent, iconUrl: string | null): NotificationWebhookPayload {
-  return {
+  const payload: NotificationWebhookPayload = {
     version: 1,
     product: "lambdata",
     id: event.id,
@@ -184,6 +186,8 @@ export function webhookPayload(event: NotificationEvent, iconUrl: string | null)
     link: event.link,
     iconUrl: iconFor(iconUrl),
   };
+  if (event.changes) payload.changes = { tables: event.changes.tables.map((t) => ({ ...t })), truncated: event.changes.truncated === true };
+  return payload;
 }
 
 export function signWebhook(secret: string, timestamp: number, body: string): string {

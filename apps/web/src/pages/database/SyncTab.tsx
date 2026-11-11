@@ -19,6 +19,7 @@ import { useToast } from "../../components/ui/Toast";
 import { invalidateHistory, useCheckpointList, useDatabaseJobs } from "../../components/checkpoints/queries";
 import { compactSummary, formatDue, settingsSummary, syncCheckpointLine, syncIntervalLabel } from "../../components/checkpoints/policy";
 import { useSyncNow } from "../../components/sync/SyncNow";
+import { changeHeadline, notComparedText, readSyncChanges, SyncChanges } from "../../components/sync/SyncChanges";
 import { api, errorMessage } from "../../lib/api";
 import { useCanWriteDatabase } from "../../lib/auth";
 import { databasePath } from "../../lib/commands";
@@ -77,8 +78,10 @@ function SyncStatusCard({ db, current }: { db: Database; current: SyncJob }) {
       } else if (job.status === "succeeded") {
         const r = job.result as unknown as SyncJobResult | null;
         const line = r ? syncCheckpointLine(r, null, intervalRef.current) : null;
+        const changes = readSyncChanges(r?.changes);
+        const what = changes ? [`${changeHeadline(changes)}.`, notComparedText(changes)].filter(Boolean).join(" ") : r?.unchanged ? "No data changed." : r ? `${pluralize(r.tables, "table")} copied.` : null;
         toast.success("Sync finished", {
-          description: r ? [r.unchanged ? "No data changed." : `${pluralize(r.tables, "table")} copied.`, line ? `${line.text}.`.replace(/\.\.$/, ".") : null].filter(Boolean).join(" ") : undefined,
+          description: r ? [what, line ? `${line.text}.`.replace(/\.\.$/, ".") : null].filter(Boolean).join(" ") : undefined,
         });
       }
     },
@@ -126,6 +129,7 @@ function SyncStatusCard({ db, current }: { db: Database; current: SyncJob }) {
     .filter((j) => j.kind === "sync.run" && !isJobActive(j))
     .sort((a, b) => (b.finishedAt ?? b.createdAt) - (a.finishedAt ?? a.createdAt))[0];
   const lastResult = lastSync?.status === "succeeded" ? (lastSync.result as unknown as SyncJobResult | null) : null;
+  const lastChanges = readSyncChanges(lastResult?.changes);
   const lastWithErrors = !!lastSync && jobState(lastSync) === "done-with-errors" && current.lastStatus === "ok";
   const lastFailures = lastWithErrors && lastSync ? jobCodeFailures(lastSync) : [];
   const byId = new Map((history.data?.checkpoints ?? []).map((cp) => [cp.id, cp]));
@@ -188,7 +192,16 @@ function SyncStatusCard({ db, current }: { db: Database; current: SyncJob }) {
                 {lastResult && (
                   <span className="basis-full text-text-muted sm:basis-auto">
                     <span aria-hidden className="hidden sm:inline">· </span>
-                    {pluralize(lastResult.tables, "table")} · {lastResult.unchanged ? "no data changed" : "data changed"}
+                    {pluralize(lastResult.tables, "table")} ·{" "}
+                    {lastChanges
+                      ? lastChanges.tablesChanged === 0
+                        ? (lastChanges.tablesNotCompared ?? 0) > 0
+                          ? "not fully compared"
+                          : "nothing changed"
+                        : `${pluralize(lastChanges.tablesChanged, "table")} changed`
+                      : lastResult.unchanged
+                        ? "no data changed"
+                        : "data changed"}
                     {lastLine && (
                       <>
                         {" "}
@@ -226,6 +239,7 @@ function SyncStatusCard({ db, current }: { db: Database; current: SyncJob }) {
             {!current.enabled && <Badge variant="muted">paused</Badge>}
           </div>
         )}
+        {!showPanel && lastChanges && (lastChanges.tablesChanged > 0 || (lastChanges.tablesNotCompared ?? 0) > 0) && <SyncChanges changes={lastChanges} />}
         {!showPanel && lastWithErrors && lastSync && (
           <Alert variant="warning" title={`${finishedWithErrorsText(lastFailures)} in the mirror`} data-job-state="done-with-errors">
             <div className="space-y-2.5">
@@ -305,7 +319,8 @@ export function syncSummary(job: Job, byId: Map<string, { shortHash: string }>, 
   const cp = r.checkpointId ? byId.get(r.checkpointId) : null;
   const line = syncCheckpointLine(r, cp?.shortHash ?? null, intervalHours);
   const copied = jobState(job) === "done-with-errors" ? `${pluralize(r.tables, "table")} copied and in place` : `${pluralize(r.tables, "table")} copied`;
-  const changed = r.unchanged ? "; no data changed" : "";
+  const changes = readSyncChanges(r.changes);
+  const changed = changes ? "" : r.unchanged ? "; no data changed" : "";
   return (
     <>
       <span className="block">
@@ -313,6 +328,7 @@ export function syncSummary(job: Job, byId: Map<string, { shortHash: string }>, 
         {changed}.
         {jobState(job) === "done-with-errors" ? " Some objects from the source could not be created in the mirror; they are listed below." : ""}
       </span>
+      {changes && <SyncChanges changes={changes} className="my-2" />}
       {line && (
         <span className={line.tone === "warn" ? "block text-warn" : line.tone === "success" ? "block text-text" : "block"} data-sync-checkpoint={r.checkpointKind ?? r.checkpointSkipped ?? "none"}>
           {line.text.endsWith(".") ? line.text : `${line.text}.`}

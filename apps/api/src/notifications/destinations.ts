@@ -68,6 +68,7 @@ const common = {
   events,
   databaseIds: databaseIds.optional(),
   iconUrl: iconUrl.optional(),
+  skipUnchanged: z.boolean().optional(),
 };
 
 export const createSchema = z.discriminatedUnion("kind", [
@@ -83,6 +84,7 @@ export const updateSchema = z.object({
   events: events.optional(),
   databaseIds: databaseIds.optional(),
   iconUrl: iconUrl.optional(),
+  skipUnchanged: z.boolean().optional(),
   config: z.record(z.string(), z.unknown()).optional(),
 });
 
@@ -273,6 +275,7 @@ export async function createDestination(body: unknown, userId: string | null): P
     events: uniqueEvents(input.events),
     databaseIds: validDatabases(input.databaseIds) ?? null,
     iconUrl: validIcon(input.iconUrl) ?? null,
+    skipUnchanged: input.skipUnchanged === true,
     createdByUserId: userId,
     createdAt: now,
     updatedAt: now,
@@ -310,6 +313,7 @@ export async function updateDestination(id: string, body: unknown): Promise<{ de
   if (input.events !== undefined) patch.events = uniqueEvents(input.events);
   if (input.databaseIds !== undefined) patch.databaseIds = validDatabases(input.databaseIds, rec.databaseIds) ?? null;
   if (input.iconUrl !== undefined) patch.iconUrl = validIcon(input.iconUrl) ?? null;
+  if (input.skipUnchanged !== undefined) patch.skipUnchanged = input.skipUnchanged;
   notificationDestinations.update(id, patch, Date.now());
   const disabled = rec.enabled && input.enabled === false;
   if (disabled) notificationDeliveries.dropQueued(id, "destination was turned off");

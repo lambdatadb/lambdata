@@ -1,4 +1,5 @@
-import type { NotificationEventType, Role } from "@lambdata/shared";
+import type { NotificationEventType, Role, TableRowChange } from "@lambdata/shared";
+import { accessTokenForUser } from "../accessTokens";
 import { databases, users } from "../db/queries";
 import { notificationDeliveries, notificationDestinations, type DestinationMatch } from "../db/queries/notifications";
 import { sanitizeErrorMessage } from "../jobs/sanitize";
@@ -15,8 +16,10 @@ export interface EventContent {
   database?: DatabaseRef | null;
   fields?: EventField[];
   data?: Record<string, string | number | boolean | null>;
+  changes?: { tables: TableRowChange[]; truncated: boolean } | null;
   linkPath?: string | null;
   occurredAt?: number;
+  unchanged?: boolean;
 }
 
 export interface DatabaseRef {
@@ -46,6 +49,10 @@ export function anyEnabledDestination(): boolean {
   return enabledDestinations().length > 0;
 }
 
+export const actorLookup = {
+  token: accessTokenForUser,
+};
+
 function matching(type: NotificationEventType, databaseId: string | null): DestinationMatch[] {
   const perDatabase = eventInfo(type).perDatabase;
   return enabledDestinations().filter((d) => {
@@ -70,10 +77,12 @@ export function consoleLink(path: string | null | undefined): string | null {
 
 export function emit(type: NotificationEventType, databaseId: string | null, build: () => EventContent | null): number {
   try {
-    const targets = matching(type, databaseId);
-    if (targets.length === 0) return 0;
+    const candidates = matching(type, databaseId);
+    if (candidates.length === 0) return 0;
     const content = build();
     if (!content) return 0;
+    const targets = content.unchanged === true ? candidates.filter((d) => !d.skipUnchanged) : candidates;
+    if (targets.length === 0) return 0;
     const info = eventInfo(type);
     const event: NotificationEvent = {
       id: newId("evt"),
@@ -87,6 +96,7 @@ export function emit(type: NotificationEventType, databaseId: string | null, bui
       database: content.database ?? null,
       fields: content.fields ?? [],
       data: content.data ?? {},
+      ...(content.changes ? { changes: content.changes } : {}),
       link: consoleLink(content.linkPath),
     };
     const payload = JSON.stringify(event);
@@ -156,8 +166,25 @@ export function forgetUser(id: string): void {
   userNames.delete(id);
 }
 
+export const TOKEN_SUFFIX = " (access token)";
+
+export function tokenActorName(name: unknown): string {
+  return `${cleanUserText(name, 100) || "Unnamed"}${TOKEN_SUFFIX}`;
+}
+
+export function tokenOf(userId: string | null | undefined): { id: string; name: string } | null {
+  if (!userId) return null;
+  try {
+    return actorLookup.token(userId);
+  } catch {
+    return null;
+  }
+}
+
 export function actorOf(userId: string | null): { displayName: string } | null {
   if (!userId) return null;
+  const token = tokenOf(userId);
+  if (token) return { displayName: tokenActorName(token.name) };
   return { displayName: rememberUser(userId) ?? "Someone" };
 }
 

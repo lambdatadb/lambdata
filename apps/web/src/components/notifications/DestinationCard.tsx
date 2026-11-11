@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react";
-import { ChevronDown, Database as DatabaseIcon, KeyRound, ListChecks, Pencil, Send, Trash2, TriangleAlert, X } from "lucide-react";
+import { BellOff, ChevronDown, Database as DatabaseIcon, KeyRound, ListChecks, Pencil, Send, Trash2, TriangleAlert, X } from "lucide-react";
 import type { NotificationCatalogResponse, NotificationDestination, NotificationTestResponse } from "@lambdata/shared";
 import { Alert, Badge, Button, Card, Spinner, StatusDot, Switch, cn } from "../ui";
 import { errorMessage } from "../../lib/api";
@@ -166,6 +166,7 @@ export function DestinationCard({
           <div className="flex flex-wrap gap-x-4 gap-y-1 text-label text-text-muted">
             <Fact icon={ListChecks}>{eventsText(dest, catalog)}</Fact>
             <Fact icon={DatabaseIcon}>{scopeText(dest, databaseNames, catalog)}</Fact>
+            {dest.skipUnchanged && <Fact icon={BellOff}>Skips syncs that changed nothing</Fact>}
             {dest.kind === "webhook" && (
               <Fact icon={KeyRound}>
                 {dest.hasSecret ? "Signed" : "Not signed"}

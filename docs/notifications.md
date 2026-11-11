@@ -17,6 +17,7 @@ Every destination has:
 - the **events** it gets ([Choose events](#choose-events-and-databases));
 - the **databases** it follows;
 - an **icon** ([Icon](#icon));
+- **Skip sync messages when nothing changed** ([below](#skip-sync-messages-when-nothing-changed)), off unless you turn it on;
 - an **On/Off** switch. While a destination is off, nothing is sent to it, and events that happen meanwhile are not sent later.
 
 LambData runs in a container, so `localhost` there is the container itself. To reach something else on your server, use the server's network address instead.
@@ -67,17 +68,18 @@ You can also add up to 10 **custom headers**, for an endpoint that wants a key i
 
 ## Choose events and databases
 
-The event list is grouped (Databases, Checkpoints, Mirrors, Imports, Access, Health), with a select-all per group and **Use defaults**.
+The event list is grouped (Databases, Checkpoints, Mirrors, Imports, Access, Access tokens, Health), with a select-all per group and **Use defaults**.
 
-A new destination starts with everything that a person did or that needs a person's attention. Three routine events start off because they can be noisy:
+A new destination starts with everything that a person did or that needs a person's attention. A few routine events start off because they can be noisy:
 
 - **Automatic checkpoint**: scheduled checkpoints send one message per database every time they run;
-- **Sync finished**: a mirror that syncs every five minutes sends a message every five minutes;
-- **Disk space recovered**.
+- **Sync finished**: a mirror that syncs every five minutes sends a message every five minutes, unless the destination [skips syncs that changed nothing](#skip-sync-messages-when-nothing-changed);
+- **Disk space recovered**;
+- **Access token created** and **Access token revoked**.
 
 Turn them on if you want a full activity feed.
 
-**Databases**: a destination follows all databases (including ones created later) or only the ones you pick. Events that are not about one database, such as console users, the network policy, MariaDB and disk space, are always sent to a destination that selected them.
+**Databases**: a destination follows all databases (including ones created later) or only the ones you pick. Events that are not about one database, such as console users, the network policy, access tokens, MariaDB and disk space, are always sent to a destination that selected them. **Approval needed** is always sent too, even when the approval is about a database the destination does not follow.
 
 All events, with the default for each:
 
@@ -86,14 +88,14 @@ All events, with the default for each:
 | Databases | Database created | Someone created a database, from scratch or from an uploaded file. | yes |
 | Databases | Database deleted | Someone deleted a database together with its data and checkpoints. | yes |
 | Databases | Password rotated | Someone generated a new password for a database; apps using the old one can no longer connect. | yes |
-| Checkpoints | Checkpoint made | Someone made a checkpoint by hand, with its message and short hash. | yes |
-| Checkpoints | Automatic checkpoint | A scheduled, sync, import or safety checkpoint was made. | no |
+| Checkpoints | Checkpoint made | Someone made a checkpoint by hand, with its message, short hash and what changed since the previous checkpoint. | yes |
+| Checkpoints | Automatic checkpoint | A scheduled, sync, import or safety checkpoint was made, with what changed since the previous checkpoint. | no |
 | Checkpoints | Checkpoint or rollback failed | A checkpoint, automatic or made by hand, or a rollback could not finish. | yes |
 | Checkpoints | Rolled back | A database was rolled back to one of its checkpoints. | yes |
 | Checkpoints | Rolled back with errors | A rollback brought the tables back, but some views, triggers or routines could not be re-created. | yes |
 | Checkpoints | Rollback refused | A rollback was stopped before anything changed. | yes |
 | Checkpoints | Checkpoint deleted | Someone deleted a checkpoint. | yes |
-| Mirrors | Sync finished | A mirror copied its source again. | no |
+| Mirrors | Sync finished | A mirror copied its source again, with how many rows were added, removed and changed ([Rows changed by a sync](#rows-changed-by-a-sync)). | no |
 | Mirrors | Sync failed | A mirror could not copy its source. | yes |
 | Mirrors | Sync recovered | A mirror synced successfully after one or more failures. | yes |
 | Imports | Import finished | A database was created from a file, or its data was replaced from one. | yes |
@@ -101,10 +103,57 @@ All events, with the default for each:
 | Access | User added, User removed | An admin added or removed a console user. | yes |
 | Access | Data API opened, Data API closed | Someone opened or closed a database to the Data API. | yes |
 | Access | Access policy changed | The rules for which networks can reach the console changed. | yes |
+| Access tokens | Access token created | An admin created an access token, so an agent or script can use the management API. | no |
+| Access tokens | Access token revoked | An admin revoked an access token. Anything still using it is refused from then on. | no |
+| Access tokens | Approval needed | An access token set to ask first wants to do something (delete a database, roll back, run a `DROP`, ...) and waits until an admin approves or denies it. The link opens the approvals page. | yes |
 | Health | MariaDB down, MariaDB back | The database server stopped unexpectedly or failed to start, and when it runs again. A deliberate stop sends nothing. | yes |
 | Health | Disk space low | Free space on the data volume fell below the floor. Sent once when it crosses the floor, not on every check. | yes |
 | Health | Disk space recovered | Free space is back above the floor (with a 5% margin, so a volume hovering at the floor does not send repeated messages). | no |
 | Health | Snapshot not converted | An old KilnDB snapshot could not be turned into a checkpoint. Sent once per snapshot, not on every retry. | yes |
+
+## Rows changed by a sync
+
+A **Sync finished** message says what the sync changed in the mirror, per table:
+
+```text
+Shop synced from its source and copied 129 tables. 3 tables changed: 1,204 rows added, 12 removed, 40 changed.
+• players: 4,310 → 5,512 rows
+• orders: 1,150 added, 0 removed, 38 changed
+• customers: 54 added, 12 removed, 2 changed
+```
+
+The largest changes come first. A message lists at most five tables and ends with "and N more." when there are others; tables that did not change are only counted. When no table changed, the message ends with "Nothing changed." The **Sync** tab of the mirror and the job's result show the same summary, with a short hint next to a table that was only counted saying why.
+
+How each table is measured:
+
+- **Row by row** (for example `orders: 1,150 added, 0 removed, 38 changed`), when the table exists before and after the sync with the same columns, is an InnoDB table, and has a primary key or a unique key whose columns are all `NOT NULL`. A row whose key is only in the new copy is added, one only in the old copy is removed, and one in both with any column different is changed (`NULL` compares correctly).
+- **Before and after** (for example `players: 4,310 → 5,512 rows`) for every other table: it has no usable key, its columns changed, it is not a plain InnoDB table, it is larger than the row limit, the time limit was reached before it could be compared row by row, or the row-by-row comparison is turned off. A table whose row count stayed the same is still checked with a checksum, so it is reported only if its rows differ.
+- A new table reads `new table, 812 rows`, a removed one `removed (had 812 rows)`, and a table whose definition changed gets "(structure changed)". The first sync into an empty mirror reports every table as new.
+- **Not compared**: a table the comparison did not reach before its time limit, and whose change the sync could not tell from what it already knew. Such tables are only counted, and the message ends with "N tables were not compared because the sync's time limit for comparing was reached." If no compared table changed, the message reads "No changes in the tables that were compared." instead of "Nothing changed."
+
+The totals after "changed:" add up the tables compared row by row. When none of them changed, the message gives the overall row difference instead, for example "+1,202 rows in all"; that difference is left out when some tables were not compared.
+
+The comparison runs while the old and the new copy of the mirror both exist, before the new one is swapped in. It only reads and keeps nothing closed. Tables whose row counts and checksums the sync already knows are settled from those without extra work; the rest are compared smallest first. If the comparison fails, the sync is not affected; the message then has no change summary. PostgreSQL sources are compared the same way, inside MariaDB.
+
+Two limits keep it from making syncs slow:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `LAMBDATA_SYNC_DIFF_MAX_ROWS` | `2000000` | Tables with more rows are only counted, not compared row by row. `0` turns the row-by-row comparison off; tables are then counted and checked with a checksum only. |
+| `LAMBDATA_SYNC_DIFF_MAX_SECONDS` | `30` | Time one sync may spend on all of its comparing work: counting, checksums and row-by-row comparisons. Tables not reached by then are reported as not compared. `0` turns the comparing work off: only tables the sync can settle from what it already knows are reported, and the rest count as not compared. |
+
+Both also accept the old `KILNDB_*` prefix.
+
+**Checkpoint messages** (**Checkpoint made** and **Automatic checkpoint**) end with the net change since the database's previous checkpoint, from what checkpoints already record: for example "Since checkpoint a41f9c2: 2 tables changed, +120 rows." or "Nothing changed since checkpoint a41f9c2." A webhook gets the same in `data`: `previousCheckpointId`, `tablesChanged`, `rowDelta` and `codeChanged` (views, triggers, routines or events changed). For the first checkpoint of a database and for converted KilnDB snapshots the first three are `null` and `codeChanged` is left out.
+
+### Skip sync messages when nothing changed
+
+Each destination has a switch **Skip sync messages when nothing changed** (off by default). When it is on, that destination does not get:
+
+- a **Sync finished** whose comparison found no changed table, left no table uncompared, and that finished without errors;
+- an **Automatic checkpoint** that holds nothing new since the checkpoint before it.
+
+Failed syncs, recoveries, syncs that finished with errors, syncs with tables that were not compared, syncs whose changes could not be measured and every other event still arrive. The destination's card shows "Skips syncs that changed nothing" while it is on.
 
 ## Icon
 
@@ -144,7 +193,7 @@ A slow or dead destination never slows down or fails the operation that caused t
 
 ## What messages contain, and what they never contain
 
-Messages carry names, short checkpoint hashes, counts, who did it (their display name) and, when you set one, a link into the console. The link uses the first public URL listed on the **Network** page; without one, messages have no link.
+Messages carry names (including the names of tables a sync changed), short checkpoint hashes, counts, who did it (their display name, or for an access token its name followed by "(access token)") and, when you set one, a link into the console. The link uses the first public URL listed on the **Network** page; without one, messages have no link.
 
 Messages never contain:
 
@@ -152,7 +201,7 @@ Messages never contain:
 - error text from MariaDB, the mirror's source or an import ("Open the console to see why" instead);
 - a mirror's source host or database, an uploaded file's name, or a snapshot's file path.
 
-Names and messages that people typed (database names, checkpoint messages, display names) are cut to 200 characters; anything that looks like an email address becomes `[email]`, and credentials such as `user:password@` or `password=...` are masked. A user without a usable display name is shown by role, for example "An admin". In chat messages this text is escaped so it cannot mention anyone (`@everyone`, `@here`, `@channel`), add links or change formatting.
+Names and messages that people typed (database names, checkpoint messages, display names) are cut to 200 characters, approval summaries to 150, token names to 100 and table names to 64; anything that looks like an email address becomes `[email]`, and credentials such as `user:password@` or `password=...` are masked. A user without a usable display name is shown by role, for example "An admin". In chat messages this text is escaped so it cannot mention anyone (`@everyone`, `@here`, `@channel`), add links or change formatting.
 
 ## Webhook reference
 
@@ -183,7 +232,7 @@ Your custom headers are sent too.
   "severity": "success",
   "occurredAt": "2026-11-10T14:30:00.000Z",
   "title": "Checkpoint made: Before the wipe (a41f9c2)",
-  "message": "Avery Chen made a checkpoint of Orders. It holds 4 tables and 1,200 rows.",
+  "message": "Avery Chen made a checkpoint of Orders. It holds 4 tables and 1,200 rows. Since checkpoint 7c03e5b: 2 tables changed, +120 rows.",
   "actor": { "displayName": "Avery Chen" },
   "database": { "id": "db_5c1e7a2b9d8f4e3a", "name": "orders", "displayName": "Orders" },
   "data": {
@@ -192,7 +241,11 @@ Your custom headers are sent too.
     "hash": "a41f9c2",
     "tables": 4,
     "rows": 1200,
-    "verified": false
+    "verified": false,
+    "previousCheckpointId": "cp_1a2b3c4d5e6f",
+    "tablesChanged": 2,
+    "rowDelta": 120,
+    "codeChanged": false
   },
   "link": "https://lambdata.example.com/databases/db_5c1e7a2b9d8f4e3a/history/cp_9b8a7c6d5e4f",
   "iconUrl": "https://raw.githubusercontent.com/lambdatadb/lambdata/main/apps/web/public/lambdata-mark.png"
@@ -205,17 +258,67 @@ Your custom headers are sent too.
 | `product` | Always `"lambdata"`. |
 | `id` | The event id. |
 | `type` | The event type (see the table above for all of them, by label), `test` or `summary`. |
-| `group` | `databases`, `checkpoints`, `mirrors`, `imports`, `access`, `health`, or `test` / `summary`. |
+| `group` | `databases`, `checkpoints`, `mirrors`, `imports`, `access`, `agents` (shown as Access tokens), `health`, or `test` / `summary`. |
 | `severity` | `info`, `success`, `warning` or `error`. |
 | `occurredAt` | When it happened, ISO 8601 in UTC. |
 | `title`, `message` | The same text the chat messages show, as plain text. |
-| `actor` | Who did it (`displayName`), or `null` for something LambData did on its own. |
+| `actor` | Who did it (`displayName`), or `null` for something LambData did on its own. For an access token, its name followed by " (access token)". |
 | `database` | The database it is about, or `null`. |
 | `data` | Extra facts for this event type: ids, short hashes, counts. Values are strings, numbers, booleans or `null`. |
+| `changes` | Only on `sync.finished`, when the sync's changes were measured: the changed tables ([below](#row-changes-in-the-payload)). Absent on every other event. |
 | `link` | A link into the console, or `null` when no public URL is set. |
 | `iconUrl` | The destination's icon, the default unless you set your own. |
 
-The event types are `database.created`, `database.deleted`, `database.password_rotated`, `checkpoint.created`, `checkpoint.auto_created`, `checkpoint.failed`, `checkpoint.rolled_back`, `checkpoint.rollback_errors`, `checkpoint.rollback_refused`, `checkpoint.deleted`, `sync.finished`, `sync.failed`, `sync.recovered`, `import.finished`, `import.failed`, `user.created`, `user.removed`, `data_api.opened`, `data_api.closed`, `network.policy_changed`, `mariadb.down`, `mariadb.recovered`, `disk.low`, `disk.recovered` and `snapshot.unconverted`.
+### Row changes in the payload
+
+A `sync.finished` payload carries the totals in `data` and the changed tables in `changes`:
+
+```json
+{
+  "type": "sync.finished",
+  "group": "mirrors",
+  "data": {
+    "databaseId": "db_7d2c9e1a4b6f8035",
+    "tables": 129,
+    "outcome": "done",
+    "codeFailures": 0,
+    "jobId": "job_4e8a1c7b2d9f",
+    "changesMeasured": true,
+    "tablesChanged": 2,
+    "tablesUnchanged": 127,
+    "rowsAdded": 1150,
+    "rowsRemoved": 0,
+    "rowsChanged": 38,
+    "rowDelta": 2352,
+    "tablesNotCompared": 0
+  },
+  "changes": {
+    "tables": [
+      { "name": "players", "change": "modified", "method": "net", "schemaChanged": false, "rowsBefore": 4310, "rowsAfter": 5512, "added": null, "removed": null, "changed": null, "reason": "no-key" },
+      { "name": "orders", "change": "modified", "method": "exact", "schemaChanged": false, "rowsBefore": 20400, "rowsAfter": 21550, "added": 1150, "removed": 0, "changed": 38 }
+    ],
+    "truncated": false
+  }
+}
+```
+
+In `data`: `changesMeasured` is `false` (and the other change fields are left out) when the changes could not be measured. `rowsAdded`, `rowsRemoved` and `rowsChanged` add up the tables compared row by row and are `null` when no table could be. `rowDelta` is rows after minus rows before, over all tables, and `null` when some tables were not compared. `tablesNotCompared` is how many tables the time limit left out.
+
+Each entry of `changes.tables`:
+
+| Field | Meaning |
+|---|---|
+| `name` | The table name, cleaned like other user text and cut to 64 characters. |
+| `change` | `added` (new table), `removed` (table gone) or `modified`. |
+| `method` | `exact` (compared row by row) or `net` (rows before and after only). |
+| `schemaChanged` | `true` when the table's definition changed. |
+| `rowsBefore`, `rowsAfter` | Row counts, `null` when there is no such table on that side. |
+| `added`, `removed`, `changed` | Row counts for `exact`; `null` for `net`. |
+| `reason` | Only for `net`: `new`, `removed`, `no-key` (no usable key), `structure` (columns changed), `too-large`, `time` (the time limit was reached; the counts come from what the sync already knew), `unsupported` (not a plain InnoDB table) or `off`. |
+
+`changes.tables` holds at most 20 tables, largest change first; `truncated` is `true` when more tables changed than are listed. The payload `version` stays `1`: `changes` is a new field, and a receiver that ignores fields it does not know needs no change.
+
+The event types are `database.created`, `database.deleted`, `database.password_rotated`, `checkpoint.created`, `checkpoint.auto_created`, `checkpoint.failed`, `checkpoint.rolled_back`, `checkpoint.rollback_errors`, `checkpoint.rollback_refused`, `checkpoint.deleted`, `sync.finished`, `sync.failed`, `sync.recovered`, `import.finished`, `import.failed`, `user.created`, `user.removed`, `data_api.opened`, `data_api.closed`, `network.policy_changed`, `token.created`, `token.revoked`, `approval.requested`, `mariadb.down`, `mariadb.recovered`, `disk.low`, `disk.recovered` and `snapshot.unconverted`.
 
 ### Summaries
 

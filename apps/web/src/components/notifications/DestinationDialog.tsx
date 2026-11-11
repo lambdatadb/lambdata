@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode, type Ref } from "react";
 import type { Database, NotificationCatalogResponse, NotificationDestination, NotificationKind } from "@lambdata/shared";
-import { Alert, Button, Dialog, Field, FieldError, Input, RadioCard, RadioGroup } from "../ui";
+import { Alert, Button, Dialog, Field, FieldError, Input, RadioCard, RadioGroup, Switch } from "../ui";
 import { errorMessage } from "../../lib/api";
 import { useDatabases } from "../../lib/queries";
 import { ConnectionFields } from "./ConnectionFields";
@@ -34,6 +34,18 @@ function Section({ title, description, children }: { title: string; description?
       </div>
       {children}
     </section>
+  );
+}
+
+export const SKIP_UNCHANGED_LABEL = "Skip sync messages when nothing changed";
+export const SKIP_UNCHANGED_HINT =
+  "A mirror that syncs often stays quiet here when a sync copied the same rows again, and an automatic checkpoint that saved nothing new is not sent either. Failed syncs, recoveries and everything else still arrive.";
+
+export function SkipUnchangedSwitch({ checked, onChange }: { checked: boolean; onChange: (checked: boolean) => void }) {
+  return (
+    <div className="rounded-md border border-border bg-bg-inset px-3 py-2.5" data-skip-unchanged={checked ? "on" : "off"}>
+      <Switch checked={checked} onCheckedChange={onChange} label={SKIP_UNCHANGED_LABEL} description={SKIP_UNCHANGED_HINT} />
+    </div>
   );
 }
 
@@ -140,6 +152,7 @@ export function DestinationForm({
             description="On by default: things a person did, and anything that needs a person. Open a group to choose single events."
           >
             <EventPicker catalog={catalog} value={draft.events} onChange={(events) => patch({ events })} error={errors.events} />
+            <SkipUnchangedSwitch checked={draft.skipUnchanged} onChange={(skipUnchanged) => patch({ skipUnchanged })} />
           </Section>
 
           <Section title="Databases">
@@ -210,6 +223,7 @@ export function DestinationDialog({ open, mode, initialKind, destination, catalo
       databaseIds: d.databaseIds,
       iconMode: d.iconMode,
       iconUrl: d.iconUrl,
+      skipUnchanged: d.skipUnchanged,
       name: d.nameTouched ? d.name : KINDS[kind].defaultName,
       nameTouched: d.nameTouched,
     }));

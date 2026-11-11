@@ -247,6 +247,7 @@ export interface DestinationDraft {
   databaseIds: string[];
   iconMode: "default" | "custom";
   iconUrl: string;
+  skipUnchanged: boolean;
 }
 
 export function newDraft(kind: NotificationKind | null, catalog: NotificationCatalogResponse): DestinationDraft {
@@ -269,6 +270,7 @@ export function newDraft(kind: NotificationKind | null, catalog: NotificationCat
     databaseIds: [],
     iconMode: "default",
     iconUrl: "",
+    skipUnchanged: false,
   };
 }
 
@@ -292,6 +294,7 @@ export function draftFrom(dest: NotificationDestination): DestinationDraft {
     databaseIds: dest.databaseIds ? [...dest.databaseIds] : [],
     iconMode: dest.iconUrl ? "custom" : "default",
     iconUrl: dest.iconUrl ?? "",
+    skipUnchanged: dest.skipUnchanged === true,
   };
 }
 
@@ -543,6 +546,7 @@ export function createRequest(draft: DestinationDraft): CreateNotificationDestin
     events: [...draft.events],
     databaseIds: scopeIds(draft),
     iconUrl: iconValue(draft),
+    skipUnchanged: draft.skipUnchanged,
   };
   switch (draft.kind) {
     case "discord":
@@ -599,6 +603,7 @@ export function updateRequest(draft: DestinationDraft, original: NotificationDes
   if ((ids === null) !== (before === null) || (ids && before && !sameSet(ids, before))) body.databaseIds = ids;
   const icon = iconValue(draft);
   if (icon !== (original.iconUrl ?? null)) body.iconUrl = icon;
+  if (draft.skipUnchanged !== (original.skipUnchanged === true)) body.skipUnchanged = draft.skipUnchanged;
   const config = configPatch(draft, original);
   if (Object.keys(config).length > 0) body.config = config;
   return body;
