@@ -34,7 +34,10 @@ import { setAsideRoute } from "./routes/setAside";
 import { accessTokensRoute } from "./routes/accessTokens";
 import { approvalsRoute } from "./routes/approvals";
 import { databaseRejectedConnectionsRoute, networkRejectedConnectionsRoute } from "./routes/rejectedConnections";
+import { mcpRoute } from "./routes/mcp";
+import { openApiRoute } from "./routes/openapi";
 import { accessTokenGate } from "./accessTokens/gate";
+import { setRootApp } from "./mcp/dispatch";
 import { invokeFunctionRequest } from "./functions/invoke";
 import { env } from "./env";
 import { isAllowedOrigin } from "./network/origins";
@@ -145,6 +148,8 @@ export function buildApp(): Hono {
   app.route("/api/notifications", notificationsRoute);
   app.route("/api/access-tokens", accessTokensRoute);
   app.route("/api/approvals", approvalsRoute);
+  app.route("/api/openapi.json", openApiRoute);
+  app.route("/mcp", mcpRoute);
   app.all("/functions/v1/*", (c) => invokeFunctionRequest(c.req.raw, "/functions/v1"));
   app.all("/api/functions/v1/*", (c) => invokeFunctionRequest(c.req.raw, "/api/functions/v1"));
   app.route("/api/functions", functionsRoute);
@@ -185,5 +190,6 @@ export function buildApp(): Hono {
 
   app.notFound((c) => c.json({ error: "not found" }, 404));
 
+  setRootApp(app);
   return app;
 }
