@@ -53,6 +53,7 @@ const DEFAULT_MESSAGES: Record<CheckpointTrigger, string> = {
   "pre-sync": "Before sync",
   "pre-restore": "Before rolling back",
   "pre-import": "Before import",
+  "pre-agent": "Before changes by an access token",
   import: "Imported data",
   legacy: "Imported snapshot",
 };

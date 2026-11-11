@@ -55,10 +55,13 @@ export const audit = {
     return db
       .query(
         `SELECT a.id, a.user_id, a.action, a.target, a.details, a.at,
-                COALESCE(u.email, a.actor_email) AS user_email,
-                u.display_name AS user_display_name
+                CASE WHEN u.kind = 'token' THEN NULL ELSE COALESCE(u.email, a.actor_email) END AS user_email,
+                u.display_name AS user_display_name,
+                CASE WHEN u.kind = 'token' THEN 'token' ELSE 'user' END AS actor_kind,
+                t.id AS token_id
          FROM audit_log a
          LEFT JOIN users u ON a.user_id = u.id
+         LEFT JOIN access_tokens t ON t.actor_user_id = a.user_id
          ORDER BY a.at DESC, a.id DESC
          LIMIT ?`,
       )

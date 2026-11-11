@@ -3,6 +3,7 @@ import { HTTPException } from "hono/http-exception";
 import type { Role, User } from "@lambdata/shared";
 import { users, databases } from "../db/queries";
 import { isLocalRequest } from "../network/request";
+import { tokenCanSeeDatabase } from "../accessTokens/index";
 import { readSessionCookie, verifyJwt } from "./jwt";
 
 export interface AuthVariables {
@@ -31,7 +32,7 @@ export const requireAuth: MiddlewareHandler<{ Variables: AuthVariables }> = asyn
   const claims = await verifyJwt(token);
   if (!claims) throw new HTTPException(401, { message: "invalid session" });
   const user = users.byId(claims.sub);
-  if (!user) throw new HTTPException(401, { message: "user not found" });
+  if (!user || user.kind !== "person") throw new HTTPException(401, { message: "user not found" });
   c.set("user", toPublicUser(user));
   await next();
 };
@@ -60,6 +61,10 @@ export function requireDbAccess(
     if (!id) throw new HTTPException(400, { message: `missing :${paramName}` });
     const dbRow = databases.byId(id);
     if (!dbRow) throw new HTTPException(404, { message: "database not found" });
+    const tokenRequest = c.get("accessToken");
+    if (tokenRequest && !tokenCanSeeDatabase(tokenRequest.token, dbRow)) {
+      throw new HTTPException(404, { message: "database not found" });
+    }
     if (user.role === "admin") return next();
     if (user.role === "db_owner") {
       if (dbRow.ownerUserId !== user.id) {

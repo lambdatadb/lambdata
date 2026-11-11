@@ -2,7 +2,7 @@ import type { Checkpoint, CheckpointDiff, CheckpointTrigger, WorkingCopyStatus }
 import type { BadgeProps } from "../ui/Badge";
 import { formatBytes, formatNumber, pluralize } from "../../lib/format";
 
-export const AUTOMATIC_TRIGGERS: readonly CheckpointTrigger[] = ["scheduled", "sync", "pre-sync", "pre-restore", "pre-import"];
+export const AUTOMATIC_TRIGGERS: readonly CheckpointTrigger[] = ["scheduled", "sync", "pre-sync", "pre-restore", "pre-import", "pre-agent"];
 
 export function isAutomatic(trigger: CheckpointTrigger): boolean {
   return AUTOMATIC_TRIGGERS.includes(trigger);
@@ -15,6 +15,7 @@ const TRIGGERS: Record<CheckpointTrigger, { label: string; variant: NonNullable<
   "pre-sync": { label: "pre-sync", variant: "muted", hint: "Saved before a sync because the mirror had local changes" },
   "pre-restore": { label: "safety", variant: "warn", hint: "Saved automatically before a rollback replaced the data" },
   "pre-import": { label: "pre-import", variant: "muted", hint: "Saved automatically before an import" },
+  "pre-agent": { label: "undo point", variant: "warn", hint: "Saved automatically before an access token changed data, so the change can be undone" },
   import: { label: "import", variant: "info", hint: "Recorded after an import" },
   legacy: { label: "snapshot", variant: "muted", hint: "Converted from an older snapshot" },
 };

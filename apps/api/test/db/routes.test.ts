@@ -71,7 +71,7 @@ describe("GET /api/system/audit-logs", () => {
     const one = await (await call(admin, "/api/system/audit-logs?limit=0")).json();
     expect(one.logs.length).toBe(1);
     expect(Object.keys(one.logs[0]).sort()).toEqual(
-      ["action", "at", "details", "id", "target", "user_display_name", "user_email", "user_id"].sort(),
+      ["action", "actor_kind", "at", "details", "id", "target", "token_id", "user_display_name", "user_email", "user_id"].sort(),
     );
   });
 });

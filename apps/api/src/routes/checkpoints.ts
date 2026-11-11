@@ -10,6 +10,7 @@ import type {
   CheckpointPolicyResponse,
   CheckpointStatusResponse,
   RestoreCheckpointRequest,
+  UndoPointResponse,
 } from "@lambdata/shared";
 import { audit, checkpoints, databases } from "../db/queries";
 import { requireAuth, requireDbAccess, type AuthVariables } from "../auth/middleware";
@@ -23,6 +24,8 @@ import { CheckpointDataMissingError } from "../checkpoints/restore";
 import { automaticSchedule } from "../checkpoints/scheduler";
 import { boundedLiveSnapshot, diffAgainstLive, diffEntries, getWorkingCopyStatus } from "../checkpoints/status";
 import { notRespondingMessage } from "../util/mariadbHealth";
+import { currentAccessToken } from "../accessTokens/index";
+import { undoPointFor } from "../accessTokens/undo";
 
 export const checkpointsRoute = new Hono<{ Variables: AuthVariables }>();
 
@@ -220,4 +223,31 @@ checkpointsRoute.get("/:id/checkpoints/:cid/download", requireDbAccess("id", "re
       "X-Content-Type-Options": "nosniff",
     },
   });
+});
+
+checkpointsRoute.get("/:id/undo", requireDbAccess("id", "read"), (c) => {
+  const id = c.req.param("id");
+  const row = databases.byId(id);
+  const req = currentAccessToken(c);
+  const res: UndoPointResponse = {
+    undo: req && row?.versioned ? undoPointFor(req.token, id) : null,
+    versioned: row?.versioned ?? false,
+  };
+  return c.json(res);
+});
+
+checkpointsRoute.post("/:id/undo", requireDbAccess("id", "owner"), async (c) => {
+  const id = c.req.param("id");
+  const req = currentAccessToken(c);
+  const point = req ? undoPointFor(req.token, id) : null;
+  if (!req || !point) {
+    throw new HTTPException(404, { message: "There is no undo point for this database. Nothing was changed." });
+  }
+  const body: RestoreCheckpointRequest = await parseJson(c, restoreBody);
+  const user = c.get("user");
+  const job = startJob({ kind: "checkpoint.restore", databaseId: id, userId: user.id }, (ctx) =>
+    restoreCheckpoint(id, point.checkpointId, { userId: user.id, hooks: ctx, allowCodeFailures: body.allowCodeFailures === true }),
+  );
+  audit.log(user.id, "checkpoint.undo", id, { checkpointId: point.checkpointId, hash: point.shortHash });
+  return jobAcceptedResponse(c, job);
 });

@@ -21,6 +21,8 @@ type DatabaseRow = {
   base_checkpoint_id: string | null;
   show_in_vitals: number;
   provision_state: ProvisionState | null;
+  created_by_token_id?: string | null;
+  created_by_token_name?: string | null;
 };
 
 export function resolveBaseShortHash(baseCheckpointId: string | null): string | null {
@@ -47,13 +49,16 @@ function rowToDb(r: DatabaseRow): Db {
     baseCheckpointId: r.base_checkpoint_id,
     baseShortHash: resolveBaseShortHash(r.base_checkpoint_id),
     showInVitals: r.show_in_vitals !== 0,
+    createdByTokenId: r.created_by_token_id ?? null,
+    createdByTokenName: r.created_by_token_name ?? null,
   };
 }
 
 const DB_SELECT = `
-  SELECT d.*, u.display_name AS owner_display_name
+  SELECT d.*, u.display_name AS owner_display_name, t.name AS created_by_token_name
   FROM databases d
   LEFT JOIN users u ON u.id = d.owner_user_id
+  LEFT JOIN access_tokens t ON t.id = d.created_by_token_id
 `;
 
 const VISIBLE = "(d.provision_state IS NULL OR d.provision_state <> 'creating')";
@@ -119,8 +124,9 @@ export const databases = {
     db.query(
       `INSERT INTO databases(id, name, display_name, owner_user_id, kind,
         mysql_user, mysql_password_enc, connections_from, tailscale_exposed, lan_exposed, created_at,
-        versioned, show_in_vitals, provision_state)
-       VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        versioned, show_in_vitals, provision_state, created_by_token_id)
+       VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+        (SELECT id FROM access_tokens WHERE actor_user_id = ?))`,
     ).run(
       d.id,
       d.name,
@@ -136,7 +142,12 @@ export const databases = {
       d.versioned ? 1 : 0,
       d.showInVitals === false ? 0 : 1,
       d.provisionState ?? null,
+      d.ownerUserId,
     );
+  },
+  countCreatedByToken(tokenId: string): number {
+    const r = db.query("SELECT COUNT(*) AS n FROM databases WHERE created_by_token_id = ?").get(tokenId) as { n: number };
+    return Number(r.n);
   },
   update(
     id: string,

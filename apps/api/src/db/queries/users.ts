@@ -21,7 +21,14 @@ type UserRow = {
   vitals_chart_style: VitalsChartStyle;
   created_at: number;
   last_login_at: number | null;
+  kind?: string | null;
 };
+
+export type UserKind = "person" | "token";
+
+function kindOf(r: UserRow): UserKind {
+  return r.kind === "token" ? "token" : "person";
+}
 
 function rowToUser(r: UserRow): User {
   return {
@@ -56,17 +63,27 @@ export class UserOwnsResourcesError extends Error {
 export const users = {
   list(): User[] {
     const rows = db
-      .query("SELECT * FROM users ORDER BY created_at ASC")
+      .query("SELECT * FROM users WHERE kind = 'person' ORDER BY created_at ASC")
       .all() as UserRow[];
     return rows.map(rowToUser);
   },
-  byId(id: string): (User & { passwordHash: string }) | null {
+  byId(id: string): (User & { passwordHash: string; kind: UserKind }) | null {
     const r = db.query("SELECT * FROM users WHERE id = ?").get(id) as UserRow | null;
+    return r ? { ...rowToUser(r), passwordHash: r.password_hash, kind: kindOf(r) } : null;
+  },
+  personById(id: string): (User & { passwordHash: string }) | null {
+    const r = db.query("SELECT * FROM users WHERE id = ? AND kind = 'person'").get(id) as UserRow | null;
     return r ? { ...rowToUser(r), passwordHash: r.password_hash } : null;
   },
   byEmail(email: string): (User & { passwordHash: string }) | null {
-    const r = db.query("SELECT * FROM users WHERE email = ?").get(email) as UserRow | null;
+    const r = db.query("SELECT * FROM users WHERE email = ? AND kind = 'person'").get(email) as UserRow | null;
     return r ? { ...rowToUser(r), passwordHash: r.password_hash } : null;
+  },
+  emailTaken(email: string): boolean {
+    return db.query("SELECT 1 AS x FROM users WHERE email = ?").get(email) !== null;
+  },
+  isTokenActor(id: string): boolean {
+    return db.query("SELECT 1 AS x FROM users WHERE id = ? AND kind = 'token'").get(id) !== null;
   },
   insert(u: {
     id: string;
@@ -118,19 +135,28 @@ export const users = {
       .get(id) as { n: number };
     return { databases: Number(dbs.n), buckets: Number(buckets.n) };
   },
-  delete(id: string): void {
-    db.transaction(() => {
+  delete(id: string): { id: string; name: string }[] {
+    return db.transaction(() => {
+      if (users.isTokenActor(id)) return [];
       const owned = users.ownedResourceCounts(id);
       if (owned.databases > 0 || owned.buckets > 0) {
         throw new UserOwnsResourcesError(owned.databases, owned.buckets);
       }
+      const revoked = db
+        .query("SELECT id, name FROM access_tokens WHERE created_by_user_id = ? AND revoked_at IS NULL")
+        .all(id) as { id: string; name: string }[];
+      db.query("UPDATE access_tokens SET revoked_at = ? WHERE created_by_user_id = ? AND revoked_at IS NULL").run(
+        Date.now(),
+        id,
+      );
       db.query(
         `UPDATE audit_log
          SET actor_email = COALESCE(actor_email, (SELECT email FROM users WHERE id = ?)),
              user_id = NULL
          WHERE user_id = ?`,
       ).run(id, id);
-      db.query("DELETE FROM users WHERE id = ?").run(id);
+      db.query("DELETE FROM users WHERE id = ? AND kind = 'person'").run(id);
+      return revoked;
     })();
   },
 };

@@ -19,6 +19,7 @@ import {
 import { assertDiskRoom } from "../util/disk";
 import { isSafeHostPattern } from "../util/ident";
 import { parseJson } from "../util/validate";
+import { mayRevealCredentials, reserveDatabaseSlot } from "../accessTokens/index";
 
 export const importsRoute = new Hono<{ Variables: AuthVariables }>();
 
@@ -93,13 +94,18 @@ importsRoute.post("/uploads/:id/create-database", async (c) => {
   const body = await parseJson(c, createSchema);
   assertDiskRoom(IMPORT_ACTION, upload.sizeBytes);
   disableRequestTimeout(c);
-  const result = await createDatabaseFromUpload({
-    user,
-    upload,
-    displayName: body.displayName,
-    connectionsFrom: body.connectionsFrom || undefined,
-    tailnetOnly: body.tailnetOnly,
-    versioned: body.versioned,
-  });
-  return c.json(result, 202);
+  const release = reserveDatabaseSlot(c);
+  try {
+    const result = await createDatabaseFromUpload({
+      user,
+      upload,
+      displayName: body.displayName,
+      connectionsFrom: body.connectionsFrom || undefined,
+      tailnetOnly: body.tailnetOnly,
+      versioned: body.versioned,
+    });
+    return c.json({ ...result, credentials: mayRevealCredentials(c) ? result.credentials : null }, 202);
+  } finally {
+    release();
+  }
 });

@@ -1,6 +1,7 @@
 import { join, resolve } from "node:path";
 import { Hono, type MiddlewareHandler } from "hono";
 import { cors } from "hono/cors";
+import { APPROVAL_HEADER, NOTE_HEADER } from "@lambdata/shared";
 import { logger } from "hono/logger";
 import { HTTPException } from "hono/http-exception";
 import { authRoute } from "./routes/auth";
@@ -30,7 +31,10 @@ import { functionsRoute } from "./routes/functions";
 import { healthRoute } from "./routes/health";
 import { notificationsRoute } from "./routes/notifications";
 import { setAsideRoute } from "./routes/setAside";
+import { accessTokensRoute } from "./routes/accessTokens";
+import { approvalsRoute } from "./routes/approvals";
 import { databaseRejectedConnectionsRoute, networkRejectedConnectionsRoute } from "./routes/rejectedConnections";
+import { accessTokenGate } from "./accessTokens/gate";
 import { invokeFunctionRequest } from "./functions/invoke";
 import { env } from "./env";
 import { isAllowedOrigin } from "./network/origins";
@@ -102,11 +106,12 @@ export function buildApp(): Hono {
       origin: (origin) => (isAllowedOrigin(origin) ? origin : ""),
       credentials: true,
       allowMethods: ["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
-      allowHeaders: ["Content-Type", "Authorization", "X-File-Name"],
+      allowHeaders: ["Content-Type", "Authorization", "X-File-Name", NOTE_HEADER, APPROVAL_HEADER],
     }),
   );
   app.use("*", accessGuard);
   app.use("*", requestForgeryGuard);
+  app.use("*", accessTokenGate);
   app.use("*", maintenanceGate);
   app.use("*", requestBodyLimit);
 
@@ -138,6 +143,8 @@ export function buildApp(): Hono {
   app.route("/api/data", dataApiRoute);
   app.route("/api/realtime", realtimeRoute);
   app.route("/api/notifications", notificationsRoute);
+  app.route("/api/access-tokens", accessTokensRoute);
+  app.route("/api/approvals", approvalsRoute);
   app.all("/functions/v1/*", (c) => invokeFunctionRequest(c.req.raw, "/functions/v1"));
   app.all("/api/functions/v1/*", (c) => invokeFunctionRequest(c.req.raw, "/api/functions/v1"));
   app.route("/api/functions", functionsRoute);

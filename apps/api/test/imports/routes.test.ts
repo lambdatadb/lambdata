@@ -185,9 +185,9 @@ describe.skipIf(!available)("import HTTP routes", () => {
     const conn = await mysql.createConnection({
       host: "127.0.0.1",
       port: instance.mariadbPort,
-      user: body.credentials.user,
-      password: body.credentials.password,
-      database: body.credentials.schema,
+      user: body.credentials!.user,
+      password: body.credentials!.password,
+      database: body.credentials!.schema,
       supportBigNumbers: true,
       bigNumberStrings: true,
     });

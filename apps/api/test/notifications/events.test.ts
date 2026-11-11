@@ -297,7 +297,7 @@ describe.skipIf(!mariadbAvailable())("notification events from their real trigge
     expect(failed.title).toBe("Import failed: Ban list");
     expect(failed.message).toBe(`An import into Ban list that ${adminName} started did not finish. Open the console to see why.`);
     const everything = hook.requests.map((r) => r.body).join("\n");
-    for (const leak of ["ban-export-riley", "broken.sql", "NOT SQL", created.credentials.password, created.database.mysqlUser]) {
+    for (const leak of ["ban-export-riley", "broken.sql", "NOT SQL", created.credentials!.password, created.database.mysqlUser]) {
       expect(everything).not.toContain(leak);
     }
   }, 180_000);

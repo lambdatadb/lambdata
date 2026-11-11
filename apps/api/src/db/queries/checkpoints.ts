@@ -51,13 +51,14 @@ export const AUTOMATIC_TRIGGERS: readonly CheckpointTrigger[] = [
   "pre-sync",
   "pre-restore",
   "pre-import",
+  "pre-agent",
 ];
 
 export type RetentionGroup = "automatic" | "safety";
 
 export const RETENTION_GROUPS: Record<RetentionGroup, readonly CheckpointTrigger[]> = {
   automatic: ["scheduled", "sync"],
-  safety: ["pre-sync", "pre-restore", "pre-import"],
+  safety: ["pre-sync", "pre-restore", "pre-import", "pre-agent"],
 };
 
 export const MANUAL_SYNC_CHECKPOINT_MODES: readonly ManualSyncCheckpointMode[] = ["ask", "always", "never"];

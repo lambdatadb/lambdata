@@ -1,10 +1,11 @@
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import type { Job, JobListResponse, JobResponse, User } from "@lambdata/shared";
 import { databases, jobs as jobStore } from "../db/queries";
 import { requireAuth, type AuthVariables } from "../auth/middleware";
 import { getJob, withLiveState } from "../jobs";
+import { currentAccessToken, tokenSeesEverything, visibleToRequest } from "../accessTokens/index";
 import { parseQuery, zBoolish } from "../util/validate";
 
 export const jobsRoute = new Hono<{ Variables: AuthVariables }>();
@@ -26,6 +27,11 @@ function canSeeJob(user: User, job: Job): boolean {
   return job.createdByUserId === user.id && databases.byId(job.databaseId) === null;
 }
 
+function scopedToken(c: Context): boolean {
+  const req = currentAccessToken(c);
+  return req !== null && !tokenSeesEverything(req.token);
+}
+
 const listQuery = z.object({
   databaseId: z.string().min(1).max(128).optional(),
   active: zBoolish.optional(),
@@ -42,10 +48,10 @@ jobsRoute.get("/", (c) => {
       throw new HTTPException(404, { message: "database not found" });
     }
     list = jobStore.list({ databaseId: q.databaseId, activeOnly, limit: q.limit });
-  } else if (user.role === "admin") {
+  } else if (user.role === "admin" && !scopedToken(c)) {
     list = jobStore.list({ activeOnly, limit: q.limit });
   } else {
-    const visible = user.role === "db_owner" ? databases.listForUser(user.id) : databases.list();
+    const visible = visibleToRequest(c, user.role === "db_owner" ? databases.listForUser(user.id) : databases.list());
     list = jobStore.list({
       databaseIds: visible.map((d) => d.id),
       includeWithoutDatabase: false,

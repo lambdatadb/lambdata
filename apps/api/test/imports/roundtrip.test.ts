@@ -49,7 +49,7 @@ describe.skipIf(!available)("checkpoint download round trip", () => {
 
   test("a downloaded checkpoint imports as a new database whose views, triggers and routines work as its own user", async () => {
     const source = (await (await call("POST", "/api/databases", { displayName: "Round Source" })).json()) as ImportCreateDatabaseResponse;
-    const src = await connectAs(instance.mariadbPort, source.credentials);
+    const src = await connectAs(instance.mariadbPort, source.credentials!);
     try {
       await src.query("CREATE TABLE players (steamid BIGINT NOT NULL PRIMARY KEY, name VARCHAR(32) NOT NULL, score INT NOT NULL)");
       await src.query("CREATE TABLE audit (id INT AUTO_INCREMENT PRIMARY KEY, n INT)");
@@ -101,7 +101,7 @@ describe.skipIf(!available)("checkpoint download round trip", () => {
       expect(String(b[0]!.Checksum)).toBe(String(a[0]!.Checksum));
     }
 
-    const copy = await connectAs(instance.mariadbPort, created.credentials);
+    const copy = await connectAs(instance.mariadbPort, created.credentials!);
     try {
       const [view] = await copy.query("SELECT steamid, name, doubled FROM top_players ORDER BY steamid");
       expect(view as unknown).toEqual([

@@ -3,6 +3,7 @@ import { effectivePolicy, isOpenPolicy, loadNetworkConfig } from "./config";
 import { classifyRaw, classifyRequest, needsUserspaceLookup } from "./classify";
 import { evaluateAccess, isExemptPath } from "./policy";
 import { hasLoopbackHostEvidence, requestFacts } from "./request";
+import { mcpOriginOf } from "../accessTokens/index";
 
 interface RequestIpSource {
   requestIP(req: Request): { address: string; port: number } | null;
@@ -23,11 +24,12 @@ export const accessGuard: MiddlewareHandler = async (c, next) => {
   const path = c.req.path;
   if (isExemptPath(path)) return next();
   const policy = effectivePolicy(config);
+  const inner = mcpOriginOf(c.req.raw);
   if (isOpenPolicy(policy)) {
-    if (needsUserspaceLookup(facts) || hasLoopbackHostEvidence(facts)) await classifyRequest(c);
+    if (!inner && (needsUserspaceLookup(facts) || hasLoopbackHostEvidence(facts))) await classifyRequest(c);
     return next();
   }
-  const info = await classifyRequest(c);
+  const info = inner ? inner.info : await classifyRequest(c);
   const verdict = evaluateAccess(policy, info, path, c.req.method);
   if (!verdict.allowed) return deny(c, verdict.message ?? "This connection is not allowed.");
   return next();

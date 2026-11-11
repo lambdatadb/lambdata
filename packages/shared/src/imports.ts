@@ -113,7 +113,7 @@ export interface ImportCreateDatabaseRequest {
 
 export interface ImportCreateDatabaseResponse {
   database: Database;
-  credentials: DatabaseCredentials;
+  credentials: DatabaseCredentials | null;
   job: Job;
 }
 

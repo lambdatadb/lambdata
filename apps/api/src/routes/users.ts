@@ -7,6 +7,7 @@ import { hashPassword, verifyPassword } from "../auth/password";
 import { issueSessionCookie } from "../auth/jwt";
 import { requireAuth, requireRole, toPublicUser, type AuthVariables } from "../auth/middleware";
 import { revokeConsoleSessions } from "../auth/tokenVersions";
+import { ACTOR_EMAIL_DOMAIN } from "../accessTokens/index";
 import { newId } from "../util/id";
 import { rateLimit } from "../util/rateLimit";
 import { parseJson } from "../util/validate";
@@ -64,7 +65,7 @@ usersRoute.get("/", requireRole("admin"), (c) => c.json({ users: users.list() })
 usersRoute.post("/", requireRole("admin"), async (c) => {
   const body = await parseJson(c, createSchema);
   const email = body.email.toLowerCase();
-  if (users.byEmail(email)) {
+  if (users.emailTaken(email) || email.endsWith(`@${ACTOR_EMAIL_DOMAIN}`)) {
     throw new HTTPException(409, { message: "email already exists" });
   }
   const id = newId("u");
@@ -77,14 +78,14 @@ usersRoute.post("/", requireRole("admin"), async (c) => {
     experienceLevel: body.experienceLevel ?? "advanced",
   });
   audit.log(c.get("user").id, "user.create", id, { email, role: body.role });
-  return c.json({ user: publicUser(users.byId(id)) });
+  return c.json({ user: publicUser(users.personById(id)) });
 });
 
 usersRoute.patch("/:id", passwordChangeLimit, async (c) => {
   const me = c.get("user");
   const id = c.req.param("id");
   const body = await parseJson(c, patchSchema);
-  const target = users.byId(id);
+  const target = users.personById(id);
   if (!target) throw new HTTPException(404, { message: "not found" });
 
   const self = me.id === id;
@@ -115,7 +116,7 @@ usersRoute.patch("/:id", passwordChangeLimit, async (c) => {
   if (body.password !== undefined) {
     users.updatePassword(id, await hashPassword(body.password));
     revokeConsoleSessions(id);
-    if (self) await issueSessionCookie(c, id, users.byId(id)?.role ?? me.role);
+    if (self) await issueSessionCookie(c, id, users.personById(id)?.role ?? me.role);
   }
 
   const { password: _password, currentPassword: _current, ...logged } = body;
@@ -125,7 +126,7 @@ usersRoute.patch("/:id", passwordChangeLimit, async (c) => {
     ...logged,
     ...(body.password !== undefined ? { passwordChanged: true, sessionsRevoked: true } : {}),
   });
-  return c.json({ user: publicUser(users.byId(id)) });
+  return c.json({ user: publicUser(users.personById(id)) });
 });
 
 usersRoute.delete("/:id", requireRole("admin"), (c) => {
@@ -134,7 +135,11 @@ usersRoute.delete("/:id", requireRole("admin"), (c) => {
   if (id === me.id) {
     throw new HTTPException(400, { message: "cannot delete yourself" });
   }
-  users.delete(id);
+  if (users.isTokenActor(id)) throw new HTTPException(404, { message: "not found" });
+  const revoked = users.delete(id);
   audit.log(me.id, "user.delete", id, null);
+  for (const token of revoked) {
+    audit.log(me.id, "access_token.revoke", token.id, { name: token.name, reason: "creator removed" });
+  }
   return c.json({ ok: true });
 });

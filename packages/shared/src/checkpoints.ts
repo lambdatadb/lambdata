@@ -5,6 +5,7 @@ export type CheckpointTrigger =
   | "pre-sync"
   | "pre-restore"
   | "pre-import"
+  | "pre-agent"
   | "import"
   | "legacy";
 
@@ -207,4 +208,36 @@ export interface SyncJobResult {
   checkpointKind?: SyncCheckpointKind | null;
   checkpointSkipped?: SyncCheckpointSkipReason | null;
   nextAutomaticDueAt?: number | null;
+  changes?: SyncChangeSummary | null;
+}
+
+export type RowChangeMethod = "exact" | "net";
+
+export type RowChangeNetReason = "new" | "removed" | "no-key" | "structure" | "too-large" | "time" | "unsupported" | "off";
+
+export interface TableRowChange {
+  name: string;
+  change: "added" | "removed" | "modified";
+  method: RowChangeMethod;
+  schemaChanged: boolean;
+  rowsBefore: number | null;
+  rowsAfter: number | null;
+  added: number | null;
+  removed: number | null;
+  changed: number | null;
+  reason?: RowChangeNetReason;
+}
+
+export interface SyncChangeSummary {
+  tablesChanged: number;
+  tablesUnchanged: number;
+  exactTables: number;
+  netTables: number;
+  rowsAdded: number | null;
+  rowsRemoved: number | null;
+  rowsChanged: number | null;
+  rowDelta: number | null;
+  tables: TableRowChange[];
+  truncated: boolean;
+  tablesNotCompared?: number;
 }
