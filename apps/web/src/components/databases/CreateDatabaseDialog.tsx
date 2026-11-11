@@ -4,6 +4,8 @@ import { ArrowLeftRight, ArrowRight, Database as DatabaseIcon, FileUp } from "lu
 import type { Database, DatabaseCredentials, DatabaseKind } from "@lambdata/shared";
 import { api, errorMessage } from "../../lib/api";
 import { formatConnectionAddress, useDatabaseHost } from "../../lib/useConnectionInfo";
+import type { DatabaseReach } from "../../lib/connections";
+import { useIsAdmin } from "../../lib/auth";
 import { queryKeys } from "../../lib/queries";
 import { useTermNode } from "../../lib/terminology";
 import { Alert } from "../ui/Alert";
@@ -24,6 +26,7 @@ import { Switch } from "../ui/Switch";
 import { cn } from "../ui/cn";
 import { ImportCreateBody } from "../import/ImportCreateBody";
 import { useCredentialsReveal } from "./CredentialsReveal";
+import { ReachNotice } from "./ReachNotice";
 
 export interface CreateDatabaseTypeBodyProps {
   type: string;
@@ -182,6 +185,7 @@ function ProvisionBody({ type, picker, onCancel, onFinished, onBusyChange }: Cre
   const [connectionsFrom, setConnectionsFrom] = useState("%");
   const [tailnetOnly, setTailnetOnly] = useState(false);
   const conn = useDatabaseHost(tailnetOnly);
+  const isAdmin = useIsAdmin();
   const [versioned, setVersioned] = useState(false);
   const [showInVitals, setShowInVitals] = useState(true);
   const [touched, setTouched] = useState(false);
@@ -289,13 +293,15 @@ function ProvisionBody({ type, picker, onCancel, onFinished, onBusyChange }: Cre
           <BuildManifest
             kind={kind}
             schema={schema}
-            host={formatConnectionAddress(conn.host, conn.port)}
+            host={manifestHost(conn)}
             from={effectiveHost}
             tailnetOnly={tailnetOnly}
             versioned={versioned}
             className="md:col-span-2"
           />
         </div>
+
+        <ReachNotice reach={conn.reach} isAdmin={isAdmin} compact />
 
         {mutation.isError && (
           <Alert variant="danger" title="Could not provision the database">
@@ -361,10 +367,17 @@ export function AccessOptions({
   );
 }
 
+export function manifestHost(conn: { host: string; port: number; reach: DatabaseReach }): ReactNode {
+  if (conn.reach === "not-yet") return <span className="text-warn">not reachable yet</span>;
+  const address = formatConnectionAddress(conn.host, conn.port);
+  if (conn.reach === "this-machine") return `${address} · this machine`;
+  return address;
+}
+
 export interface BuildManifestProps {
   kind: string;
   schema: string;
-  host: string;
+  host: ReactNode;
   from: string;
   tailnetOnly?: boolean;
   versioned?: boolean;

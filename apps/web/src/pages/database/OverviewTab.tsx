@@ -14,17 +14,20 @@ import { Input } from "../../components/ui/Input";
 import { Switch } from "../../components/ui/Switch";
 import { toast } from "../../components/ui/Toast";
 import { useCredentialsReveal } from "../../components/databases/CredentialsReveal";
+import { ReachNotice } from "../../components/databases/ReachNotice";
+import { RejectedConnectionsCard } from "../../components/databases/RejectedConnections";
 import { VitalsStrip } from "../../components/databases/VitalsStrip";
 import { RepoBadge } from "../../components/checkpoints/RepoBadge";
 import { compactSummary } from "../../components/checkpoints/policy";
 import { useCheckpointList } from "../../components/checkpoints/queries";
 import { api, errorMessage } from "../../lib/api";
-import { useAuth, useCanWriteDatabase } from "../../lib/auth";
+import { useAuth, useCanWriteDatabase, useIsAdmin } from "../../lib/auth";
 import { databasePath } from "../../lib/commands";
 import { formatDate } from "../../lib/format";
 import { queryKeys } from "../../lib/queries";
 import { renderInlineCode, useTerminology } from "../../lib/terminology";
-import { isTailnetOnly, useDatabaseEndpoints } from "../../lib/useConnectionInfo";
+import { isTailnetOnly, useConnectionInfo, useDatabaseEndpoints, type DatabaseEndpoint } from "../../lib/useConnectionInfo";
+import type { DatabaseReach } from "../../lib/connections";
 import type { DatabaseTabProps } from "./types";
 
 function usePatchDatabase(db: Database) {
@@ -42,6 +45,7 @@ function usePatchDatabase(db: Database) {
 
 export function OverviewTab({ db }: DatabaseTabProps) {
   const { user } = useAuth();
+  const canWrite = useCanWriteDatabase(db);
   const [accessWarnings, setAccessWarnings] = useState<string[]>([]);
   return (
     <div className="space-y-4">
@@ -69,6 +73,7 @@ export function OverviewTab({ db }: DatabaseTabProps) {
         <div className="space-y-4 lg:col-span-2">
           <ConnectionCard db={db} />
           <AccessCard key={`${db.id}:${db.connectionsFrom}`} db={db} onWarnings={setAccessWarnings} />
+          <RejectedConnectionsCard db={db} canWrite={canWrite} />
         </div>
         <DetailsCard db={db} />
       </div>
@@ -80,10 +85,10 @@ function ConnectionCard({ db }: { db: Database }) {
   const t = useTerminology();
   const canWrite = useCanWriteDatabase(db);
   const reveal = useCredentialsReveal();
+  const isAdmin = useIsAdmin();
   const endpoints = useDatabaseEndpoints(db);
+  const { reach } = useConnectionInfo();
   const [confirming, setConfirming] = useState(false);
-  const primary = endpoints[0]!;
-  const others = endpoints.slice(1);
 
   const rotate = useMutation({
     mutationFn: () => api.post<{ credentials: DatabaseCredentials }>(`/databases/${db.id}/rotate-password`),
@@ -120,25 +125,7 @@ function ConnectionCard({ db }: { db: Database }) {
         }
       />
       <CardContent className="space-y-4">
-        <FieldGroup>
-          <CopyableField label={primary.label === "Tailnet" ? "Host (tailnet)" : "Host"} value={primary.host} />
-          <CopyableField label="Port" value={String(primary.port)} />
-          <CopyableField label="Schema" value={db.name} />
-          <CopyableField label="User" value={db.mysqlUser} />
-        </FieldGroup>
-        {others.map((endpoint) => (
-          <CopyableField
-            key={endpoint.label}
-            label={`${endpoint.label} host`}
-            value={endpoint.host}
-            copyLabel={`${endpoint.label.toLowerCase()} host`}
-          />
-        ))}
-        {isTailnetOnly(db.connectionsFrom) && !endpoints.some((e) => e.label === "Tailnet") && (
-          <Alert variant="warning" title="Tailnet only, but the tailnet is down">
-            This database accepts connections from 100.% addresses only. Bring Tailscale up on the Network page to reach it.
-          </Alert>
-        )}
+        <ConnectionFacts db={db} endpoints={endpoints} reach={reach} isAdmin={isAdmin} />
       </CardContent>
       <CardFooter className="justify-start text-label text-text-muted">
         The password is stored encrypted and never shown again. {canWrite ? "Rotate it to get a new one." : ""}
@@ -161,6 +148,49 @@ function ConnectionCard({ db }: { db: Database }) {
         confirmLabel="Rotate password"
       />
     </Card>
+  );
+}
+
+export function ConnectionFacts({
+  db,
+  endpoints,
+  reach,
+  isAdmin,
+}: {
+  db: Pick<Database, "name" | "mysqlUser" | "connectionsFrom">;
+  endpoints: DatabaseEndpoint[];
+  reach: DatabaseReach;
+  isAdmin: boolean;
+}) {
+  const primary = endpoints[0]!;
+  const others = endpoints.slice(1);
+  const hostLabel =
+    reach === "this-machine" ? "Host (this machine only)" : primary.label === "Tailnet" ? "Host (tailnet)" : "Host";
+  return (
+    <>
+      {reach === "not-yet" && <ReachNotice reach={reach} isAdmin={isAdmin} />}
+      <FieldGroup>
+        {reach !== "not-yet" && <CopyableField label={hostLabel} value={primary.host} />}
+        <CopyableField label="Port" value={String(primary.port)} />
+        <CopyableField label="Schema" value={db.name} />
+        <CopyableField label="User" value={db.mysqlUser} />
+      </FieldGroup>
+      {reach === "this-machine" && <ReachNotice reach={reach} isAdmin={isAdmin} />}
+      {reach === "outside" &&
+        others.map((endpoint) => (
+          <CopyableField
+            key={endpoint.label}
+            label={`${endpoint.label} host`}
+            value={endpoint.host}
+            copyLabel={`${endpoint.label.toLowerCase()} host`}
+          />
+        ))}
+      {reach === "outside" && isTailnetOnly(db.connectionsFrom) && !endpoints.some((e) => e.label === "Tailnet") && (
+        <Alert variant="warning" title="Tailnet only, but the tailnet is down">
+          This database accepts connections from 100.% addresses only. Bring Tailscale up on the Network page to reach it.
+        </Alert>
+      )}
+    </>
   );
 }
 

@@ -80,6 +80,21 @@ The template keeps the Tailscale state in `/data/.tailscale_state`, so the conta
 
 Serve and Funnel are different. Serve is only reachable from your tailnet. Funnel publishes the console on the internet; leave it off. See [Network access](network.md) for limiting the console to the tailnet.
 
+## Database connections from other machines
+
+By default MariaDB (port `3307`) listens inside the container, so a game server, an app on another machine or a tool such as DBeaver cannot connect yet, and the console says so next to every database address. To let them in:
+
+1. In LambData, open **Network** and turn on **Allow database clients on other machines** in the **Database connections** card. MariaDB restarts and open database connections drop for a moment.
+2. Publish the port. On the **Docker** tab, click the LambData icon and choose **Edit**.
+   - If the container has a **MariaDB Port** field, set it to `3307` (or the host port you want) and click **Apply**.
+   - If it has none, click **Add another Path, Port, Variable, Label or Device** at the bottom, choose **Port**, name it `MariaDB Port`, set **Container Port** and **Host Port** to `3307` and **Connection Type** to `TCP`, then **Add** and **Apply**.
+
+LambData cannot see Docker's port mappings, so it cannot tell you when step 2 is missing. If clients are still refused, open the database's **Overview** tab: **Rejected connections** shows the address MariaDB saw and why it said no. Through Docker's port mapping or a VPN that address can be the Docker network's gateway rather than the client's own address; it is the one to put in "connections from".
+
+Some templates have a **MariaDB Bind Address** variable (it sets `LAMBDATA_MARIADB_BIND`). When it is filled in, it decides instead of the console switch: the switch shows the value and says it comes from the container's variable. A container that already sets it to `0.0.0.0`, as earlier versions needed, keeps working that way. To use the switch instead, remove the variable from the container (the **Remove** button next to it), click **Apply**, and turn the switch on.
+
+Only publish the port on a network you trust, and do not forward it on your router unless you mean to. See [Network access](network.md#database-connections).
+
 ## Updates
 
 Use **Check for Updates** on the **Docker** tab. The template follows the `latest` image published from LambData's `main` branch.

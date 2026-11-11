@@ -4,6 +4,7 @@ import { z } from "zod";
 import type {
   AccessPolicy,
   CloudflareAccessTestResponse,
+  DatabasePortResponse,
   NetworkStatusResponse,
 } from "@lambdata/shared";
 import { audit } from "../db/queries";
@@ -35,6 +36,13 @@ import { evaluateAccess, lockoutMessage } from "../network/policy";
 import { normalizeOrigin } from "../network/origins";
 import { formatCidr, parseCidr, type Cidr } from "../network/ip";
 import { buildNetworkStatus } from "../network/status";
+import {
+  DatabasePortBusyError,
+  DatabasePortLockedError,
+  DatabasePortRestartError,
+  setOutsideConnections,
+} from "../connections/databasePort";
+import { sanitizeMariaDbMessage } from "../mariadb/messages";
 
 export const networkRoute = new Hono<{ Variables: AuthVariables }>();
 
@@ -119,6 +127,8 @@ const accessBody = z
   .strict();
 
 const serveBody = z.object({ enabled: z.boolean() }).strict();
+
+const databasePortBody = z.object({ outsideConnections: z.boolean() }).strict();
 
 async function respond(c: Context): Promise<Response> {
   const res: NetworkStatusResponse = { status: await buildNetworkStatus(c) };
@@ -354,4 +364,25 @@ networkRoute.post("/tailscale/serve", admin, async (c) => {
     url: r.status.url,
   });
   return respond(c);
+});
+
+networkRoute.put("/database-port", admin, async (c) => {
+  const { outsideConnections } = await parseJson(c, databasePortBody);
+  try {
+    const { status, outcome } = await setOutsideConnections(outsideConnections);
+    audit.log(userId(c), "network.database_port.update", null, { outsideConnections });
+    if (outcome.ok && outcome.restarted) {
+      console.log(`[network] MariaDB now listens on ${status.bind}:${status.port}`);
+    }
+    const res: DatabasePortResponse = { databasePort: status };
+    return c.json(res);
+  } catch (err) {
+    if (err instanceof DatabasePortLockedError || err instanceof DatabasePortBusyError) {
+      throw new HTTPException(409, { message: err.message });
+    }
+    if (err instanceof DatabasePortRestartError) {
+      throw new HTTPException(err.restored ? 409 : 503, { message: sanitizeMariaDbMessage(err.message) });
+    }
+    throw err;
+  }
 });

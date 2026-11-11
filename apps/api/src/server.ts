@@ -30,6 +30,7 @@ import { functionsRoute } from "./routes/functions";
 import { healthRoute } from "./routes/health";
 import { notificationsRoute } from "./routes/notifications";
 import { setAsideRoute } from "./routes/setAside";
+import { databaseRejectedConnectionsRoute, networkRejectedConnectionsRoute } from "./routes/rejectedConnections";
 import { invokeFunctionRequest } from "./functions/invoke";
 import { env } from "./env";
 import { isAllowedOrigin } from "./network/origins";
@@ -121,8 +122,10 @@ export function buildApp(): Hono {
   app.route("/api/databases", queryRoute);
   app.route("/api/databases", metricsRoute);
   app.route("/api/databases", setAsideRoute);
+  app.route("/api/databases", databaseRejectedConnectionsRoute);
   app.route("/api/imports", importsRoute);
   app.route("/api/network", networkRoute);
+  app.route("/api/network", networkRejectedConnectionsRoute);
   app.route("/api/dashboard", dashboardRoute);
   app.route("/api/tailscale", tailscaleRoute);
   app.route("/api/settings", settingsRoute);

@@ -7,14 +7,18 @@ import { Button } from "../ui/Button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "../ui/Collapsible";
 import { CopyButton, CopyableField } from "../ui/CopyableField";
 import { Dialog } from "../ui/Dialog";
+import { Badge } from "../ui/Badge";
 import { FieldGroup } from "../ui/Field";
 import { useTerminology } from "../../lib/terminology";
+import { useIsAdmin } from "../../lib/auth";
+import type { DatabaseReach } from "../../lib/connections";
 import { databasePath } from "../../lib/commands";
 import { isJobActive, useJob } from "../../lib/jobs";
 import { useDatabase } from "../../lib/queries";
 import { isTailnetOnly, useRevealedCredentials } from "../../lib/useConnectionInfo";
 import { importOutcome, importSuccessText, isImportJob } from "../import/result";
 import { JobProgress } from "../jobs/JobProgress";
+import { ReachNotice } from "./ReachNotice";
 
 export interface CredentialsRevealRequest {
   credentials: DatabaseCredentials;
@@ -71,7 +75,8 @@ function RevealDialog({ request, onDone }: { request: CredentialsRevealRequest; 
   const { job } = useJob(request.jobId);
   const database = useDatabase(request.tailnetOnly === undefined ? request.databaseId : null);
   const tailnetOnly = request.tailnetOnly ?? (database.data ? isTailnetOnly(database.data.connectionsFrom) : false);
-  const { credentials, tailnetMissing } = useRevealedCredentials(request.credentials, tailnetOnly);
+  const { credentials, tailnetMissing, reach } = useRevealedCredentials(request.credentials, tailnetOnly);
+  const isAdmin = useIsAdmin();
   const bodyRef = useRef<HTMLDivElement>(null);
   const active = !!request.jobId && (!job || isJobActive(job));
   const offerOpen = (request.offerOpen ?? true) && !!request.databaseId;
@@ -116,7 +121,7 @@ function RevealDialog({ request, onDone }: { request: CredentialsRevealRequest; 
         {request.jobId && (
           <RevealJob job={job} title={request.jobTitle} databaseId={request.databaseId} onNavigate={onDone} />
         )}
-        <CredentialsFields credentials={credentials} />
+        <CredentialsFields credentials={credentials} reach={reach} isAdmin={isAdmin} />
         {tailnetMissing && (
           <Alert variant="warning" title="This database accepts tailnet connections only">
             The tailnet address of this server is not known yet. Connect to it over Tailscale, using the server&apos;s tailnet
@@ -177,7 +182,15 @@ function RevealJob({
   );
 }
 
-export function CredentialsFields({ credentials }: { credentials: DatabaseCredentials }) {
+export function CredentialsFields({
+  credentials,
+  reach = "outside",
+  isAdmin = false,
+}: {
+  credentials: DatabaseCredentials;
+  reach?: DatabaseReach;
+  isAdmin?: boolean;
+}) {
   const t = useTerminology();
   const [showStrings, setShowStrings] = useState(false);
   const fields = useMemo(
@@ -188,8 +201,11 @@ export function CredentialsFields({ credentials }: { credentials: DatabaseCreden
     ],
     [credentials, t],
   );
+  const notYet = reach === "not-yet";
+  const hostLabel = notYet ? "Host (not reachable yet)" : reach === "this-machine" ? "Host (this machine only)" : "Host";
   return (
     <div className="space-y-4">
+      {notYet && <ReachNotice reach={reach} isAdmin={isAdmin} />}
       <div className="space-y-2 rounded-lg border border-warn/30 bg-warn/[0.05] p-3">
         <CopyableField label="Password" value={credentials.password} secret />
         <p className="flex items-start gap-1.5 text-micro text-text-muted">
@@ -198,7 +214,7 @@ export function CredentialsFields({ credentials }: { credentials: DatabaseCreden
         </p>
       </div>
       <FieldGroup>
-        <CopyableField label="Host" value={credentials.host} />
+        <CopyableField label={hostLabel} value={credentials.host} />
         <CopyableField label="Port" value={String(credentials.port)} />
         <CopyableField label="Schema" value={credentials.schema} />
         <CopyableField label="User" value={credentials.user} />
@@ -209,9 +225,23 @@ export function CredentialsFields({ credentials }: { credentials: DatabaseCreden
             <ChevronRight className="transition-transform group-data-[state=open]:rotate-90" />
             Connection strings
             <span className="text-text-subtle">include the password</span>
+            {notYet && (
+              <Badge size="sm" variant="warn">
+                not reachable yet
+              </Badge>
+            )}
           </Button>
         </CollapsibleTrigger>
         <CollapsibleContent className="space-y-4 pt-3">
+          {notYet && (
+            <p className="text-label text-text-muted">
+              These strings use the address other machines will use once outside connections are on. Until then they do not
+              work from another computer.
+            </p>
+          )}
+          {reach === "this-machine" && (
+            <p className="text-label text-text-muted">These strings work on the LambData server itself only.</p>
+          )}
           {fields.map((field) => (
             <CopyableField key={field.copy} label={field.label} value={field.value} copyLabel={field.copy} />
           ))}

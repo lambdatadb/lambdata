@@ -1,3 +1,4 @@
+import type { DatabasePortStatus } from "./connections";
 import type { TailscaleStatus } from "./types";
 
 export type IngressKind = "loopback" | "lan" | "tailnet" | "cloudflare";
@@ -52,6 +53,7 @@ export interface NetworkStatus {
   };
   tailscale: TailscaleStatus & { serve: TailscaleServeStatus };
   bind: { host: string; port: number; mariadbBind: string; mariadbPort: number };
+  databasePort?: DatabasePortStatus;
 }
 
 export interface NetworkStatusResponse {

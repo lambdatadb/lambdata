@@ -7,3 +7,4 @@ export * from "./network";
 export * from "./dataAccess";
 export * from "./notifications";
 export * from "./quarantine";
+export * from "./connections";

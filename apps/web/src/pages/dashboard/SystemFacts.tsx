@@ -10,6 +10,9 @@ export function SystemFacts({ summary }: { summary: DashboardSummary | undefined
     { label: "functions", value: `${functions.total} · ${functions.invocations24h} runs 24h` },
   ];
   if (sync.mirrors > 0) facts.push({ label: "mirrors", value: `${sync.ok} ok · ${sync.failing} failing` });
+  if (system.outsideConnections !== undefined) {
+    facts.push({ label: "outside connections", value: system.outsideConnections ? "on" : "off" });
+  }
   return (
     <ul className="flex flex-wrap items-center gap-x-5 gap-y-1.5 font-mono text-micro text-text-subtle">
       <li className="inline-flex items-center gap-1.5">

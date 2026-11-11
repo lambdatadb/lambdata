@@ -1,19 +1,23 @@
 import { useEffect, useId, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useNavigate } from "react-router-dom";
 import { ArrowRight, RotateCcw } from "lucide-react";
 import { ApiError, errorMessage } from "../../lib/api";
 import { formatNumber, pluralize } from "../../lib/format";
 import { isJobConflict, useTrackJob } from "../../lib/jobs";
 import { queryKeys } from "../../lib/queries";
-import { formatConnectionAddress, useDatabaseHost } from "../../lib/useConnectionInfo";
+import { useDatabaseHost } from "../../lib/useConnectionInfo";
+import { useIsAdmin } from "../../lib/auth";
 import { useCredentialsReveal } from "../databases/CredentialsReveal";
 import {
   AccessOptions,
   BuildManifest,
   deriveSchema,
   hostError,
+  manifestHost,
   type CreateDatabaseTypeBodyProps,
 } from "../databases/CreateDatabaseDialog";
+import { ReachNotice } from "../databases/ReachNotice";
 import { JobConflictNotice } from "../jobs/JobConflictNotice";
 import { Alert } from "../ui/Alert";
 import { Button } from "../ui/Button";
@@ -21,6 +25,8 @@ import { DialogBody, DialogFooter } from "../ui/Dialog";
 import { Field } from "../ui/Field";
 import { Input } from "../ui/Input";
 import { Switch } from "../ui/Switch";
+import { toast } from "../ui/Toast";
+import { databasePath } from "../../lib/commands";
 import { createDatabaseFromUpload } from "./api";
 import { displayNameFromFile, sentence } from "./format";
 import { PlanReview } from "./PlanReview";
@@ -77,6 +83,7 @@ function footerStatus(state: ImportSourceState, schema: string): ReactNode {
 export function ImportCreateBody({ picker, onCancel, onFinished, onBusyChange }: CreateDatabaseTypeBodyProps) {
   const qc = useQueryClient();
   const reveal = useCredentialsReveal();
+  const navigate = useNavigate();
   const trackJob = useTrackJob();
   const source = useImportSource();
   const { state } = source;
@@ -85,6 +92,7 @@ export function ImportCreateBody({ picker, onCancel, onFinished, onBusyChange }:
   const [connectionsFrom, setConnectionsFrom] = useState("%");
   const [tailnetOnly, setTailnetOnly] = useState(false);
   const conn = useDatabaseHost(tailnetOnly);
+  const isAdmin = useIsAdmin();
   const [versioned, setVersioned] = useState(true);
   const [touched, setTouched] = useState(false);
   const nameRef = useRef<HTMLInputElement>(null);
@@ -115,6 +123,14 @@ export function ImportCreateBody({ picker, onCancel, onFinished, onBusyChange }:
       void qc.invalidateQueries({ queryKey: queryKeys.databases });
       void qc.invalidateQueries({ queryKey: queryKeys.dashboardSummary });
       trackJob(data.job);
+      if (!data.credentials) {
+        toast.success(`${data.database.displayName} was created and the import of ${fileName ?? "your file"} has started.`, {
+          description: "The password was not included in the response. Rotate the password on the database's Overview to get one.",
+        });
+        onFinished();
+        navigate(databasePath(data.database.id));
+        return;
+      }
       reveal({
         credentials: data.credentials,
         databaseId: data.database.id,
@@ -171,7 +187,7 @@ export function ImportCreateBody({ picker, onCancel, onFinished, onBusyChange }:
     <BuildManifest
       kind="standard"
       schema={schema}
-      host={formatConnectionAddress(conn.host, conn.port)}
+      host={manifestHost(conn)}
       from={effectiveHost}
       tailnetOnly={tailnetOnly}
       versioned={versioned}
@@ -189,6 +205,8 @@ export function ImportCreateBody({ picker, onCancel, onFinished, onBusyChange }:
             {picker}
           </div>
         )}
+
+        <ReachNotice reach={conn.reach} isAdmin={isAdmin} compact />
 
         {create.isError && (
           <div ref={errorRef} className="scroll-mt-4">

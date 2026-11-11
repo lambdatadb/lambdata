@@ -187,6 +187,8 @@ export interface Database {
   baseCheckpointId: string | null;
   baseShortHash: string | null;
   showInVitals: boolean;
+  createdByTokenId?: string | null;
+  createdByTokenName?: string | null;
 }
 
 export interface DatabaseCredentials {
@@ -278,6 +280,10 @@ export interface QueryResult {
   rows: unknown[][];
   durationMs: number;
   rowCount: number;
+  truncated?: boolean;
+  maxRows?: number;
+  versioned?: boolean;
+  undo?: { checkpointId: string; shortHash: string; createdNow: boolean } | null;
 }
 
 export interface AppSettings {
@@ -339,6 +345,8 @@ export interface AuditLogEntry {
   at: number;
   user_email: string | null;
   user_display_name: string | null;
+  actor_kind?: "user" | "token";
+  token_id?: string | null;
 }
 
 export type MariaDbState = "stopped" | "starting" | "running" | "restarting" | "stopping" | "failed";
@@ -383,5 +391,7 @@ export interface DashboardSummary {
     host: string;
     port: number;
     dashboardShowAddresses: boolean;
+    outsideConnections?: boolean;
+    inContainer?: boolean;
   };
 }

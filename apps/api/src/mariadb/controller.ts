@@ -1,4 +1,15 @@
-import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, statSync } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  readSync,
+  realpathSync,
+  renameSync,
+  statSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import mysql, { type Connection, type Pool, type PoolConnection, type RowDataPacket } from "mysql2/promise";
@@ -9,10 +20,18 @@ import { encryptSecret, decryptSecret } from "../util/crypto";
 import { generatePassword } from "../util/credentials";
 import { locateBinariesSync, type MariaDbBinaries } from "./installer";
 import { upgradeDataDirIfNeeded } from "./upgrade";
+import { resolveDatabaseBind } from "../connections/bind";
+import {
+  auditCaptureWanted,
+  auditLogPath,
+  auditServerArgs,
+  disableAuditCaptureForProcess,
+  enableAuditCaptureForProcess,
+} from "../connections/auditPlugin";
 
 export type MariaDbState = "stopped" | "starting" | "running" | "restarting" | "stopping" | "failed";
 
-export type ReadyReason = "start" | "retry" | "restart";
+export type ReadyReason = "start" | "retry" | "restart" | "rebind";
 export type ReadyHook = (reason: ReadyReason) => void | Promise<void>;
 
 export interface MariaDbHealth {
@@ -49,6 +68,11 @@ let lastError: string | null = null;
 let queue: Promise<void> = Promise.resolve();
 let startFailures = 0;
 let logOffsetAtSpawn = 0;
+let auditOffsetAtSpawn = 0;
+let auditRequested = false;
+let logTimer: ReturnType<typeof setInterval> | null = null;
+
+export const mariadbLogLimits = { maxBytes: 16 * 1024 * 1024, checkMs: 30_000 };
 const readyHooks: ReadyHook[] = [];
 
 function serialized<T>(fn: () => Promise<T>): Promise<T> {
@@ -163,16 +187,75 @@ async function connectAsSuperuser(): Promise<Connection> {
   throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
 }
 
-function logFilePath(): string {
+export function logFilePath(): string {
   return join(env.logsDir, "mariadb.log");
 }
 
-function logSize(): number {
+function fileSize(path: string): number {
   try {
-    return statSync(logFilePath()).size;
+    return statSync(path).size;
   } catch {
     return 0;
   }
+}
+
+function logSize(): number {
+  return fileSize(logFilePath());
+}
+
+function moveLogAside(): void {
+  const path = logFilePath();
+  renameSync(path, `${path}.1`);
+}
+
+function rotateLogBeforeSpawn(): void {
+  if (logSize() <= mariadbLogLimits.maxBytes) return;
+  try {
+    moveLogAside();
+  } catch (err) {
+    console.warn("[mariadb] could not move the MariaDB log aside before starting:", errorMessage(err));
+  }
+}
+
+export async function rotateMariaDbLogIfNeeded(): Promise<boolean> {
+  return serialized(async () => {
+    if (state !== "running" || !pool || logSize() <= mariadbLogLimits.maxBytes) return false;
+    try {
+      moveLogAside();
+    } catch (err) {
+      console.warn("[mariadb] could not move the MariaDB log aside:", errorMessage(err));
+      return false;
+    }
+    try {
+      await pool.query("FLUSH ERROR LOGS");
+    } catch (err) {
+      console.warn("[mariadb] MariaDB did not reopen its log; it keeps writing to the previous file until it restarts:", errorMessage(err));
+    }
+    return true;
+  });
+}
+
+function startLogTimer(): void {
+  if (logTimer) return;
+  logTimer = setInterval(() => {
+    void rotateMariaDbLogIfNeeded().catch(() => {});
+  }, mariadbLogLimits.checkMs);
+  logTimer.unref?.();
+}
+
+function stopLogTimer(): void {
+  if (logTimer) clearInterval(logTimer);
+  logTimer = null;
+}
+
+export interface CaptureSpawnInfo {
+  auditRequested: boolean;
+  logOffset: number;
+  auditOffset: number;
+}
+
+export function captureSpawnInfo(): CaptureSpawnInfo {
+  return { auditRequested, logOffset: logOffsetAtSpawn, auditOffset: auditOffsetAtSpawn };
 }
 
 function lastLogError(): string | null {
@@ -221,12 +304,12 @@ function prepareSecureFileDir(): string {
   return dir;
 }
 
-export function serverArgs(b: MariaDbBinaries): string[] {
-  return [
+export function serverArgs(b: MariaDbBinaries, opts: { audit?: boolean } = {}): string[] {
+  const args = [
     b.server,
     `--datadir=${env.mariadbDataDir}`,
     `--port=${env.mariadbPort}`,
-    `--bind-address=${env.mariadbBind}`,
+    `--bind-address=${env.mariadbBind.trim() || "127.0.0.1"}`,
     `--socket=${socketPathFor(env.mariadbDataDir)}`,
     `--pid-file=${join(env.mariadbDataDir, PID_FILE_NAME)}`,
     "--skip-name-resolve",
@@ -234,12 +317,17 @@ export function serverArgs(b: MariaDbBinaries): string[] {
     `--max-allowed-packet=${MAX_ALLOWED_PACKET}`,
     `--secure-file-priv=${prepareSecureFileDir()}`,
     "--local-infile=0",
+    `--log-error=${logFilePath()}`,
   ];
+  return opts.audit ? [...args, ...auditServerArgs()] : args;
 }
 
-function spawnServer(b: MariaDbBinaries): ServerProc {
-  const args = serverArgs(b);
+function spawnServer(b: MariaDbBinaries, audit: boolean): ServerProc {
+  const args = serverArgs(b, { audit });
+  rotateLogBeforeSpawn();
   logOffsetAtSpawn = logSize();
+  auditOffsetAtSpawn = fileSize(auditLogPath());
+  auditRequested = audit;
   const logFd = openSync(logFilePath(), "a");
   let proc: ServerProc;
   try {
@@ -549,8 +637,8 @@ async function upgradeIfNeeded(b: MariaDbBinaries, rootPw: string): Promise<void
   }
 }
 
-async function boot(b: MariaDbBinaries): Promise<void> {
-  const proc = spawnServer(b);
+async function bootOnce(b: MariaDbBinaries, audit: boolean): Promise<void> {
+  const proc = spawnServer(b, audit);
   try {
     await waitForReady(proc);
     const rootPw = await rootPasswordFromSettings();
@@ -572,6 +660,29 @@ async function boot(b: MariaDbBinaries): Promise<void> {
     await endPool();
     await killServer(proc);
     throw err;
+  }
+}
+
+const NOT_PLUGIN_RELATED = /Bind on TCP\/IP port|Address already in use|Can't assign requested address|served by another/i;
+
+async function boot(b: MariaDbBinaries): Promise<void> {
+  const audit = auditCaptureWanted(b.server);
+  try {
+    await bootOnce(b, audit);
+  } catch (err) {
+    if (!audit || err instanceof ForeignServerError || NOT_PLUGIN_RELATED.test(errorMessage(err))) throw err;
+    console.warn(
+      "[mariadb] MariaDB did not start with the connection audit plugin; starting it without the plugin:",
+      errorMessage(err),
+    );
+    disableAuditCaptureForProcess();
+    try {
+      await bootOnce(b, false);
+      console.warn("[mariadb] started without the audit plugin; rejected connections are read from the error log until LambData restarts");
+    } catch (retryErr) {
+      enableAuditCaptureForProcess();
+      throw retryErr;
+    }
   }
 }
 
@@ -660,6 +771,7 @@ function clearRestartTimer(): void {
 export async function startMariaDb(): Promise<void> {
   wantRunning = true;
   clearRestartTimer();
+  startLogTimer();
   let started = false;
   await serialized(async () => {
     if (!wantRunning) throw new Error("MariaDB start was cancelled by a stop request");
@@ -674,6 +786,7 @@ export async function startMariaDb(): Promise<void> {
         console.log("[mariadb] initializing data dir at", env.mariadbDataDir);
         await initDataDir(b);
       }
+      env.mariadbBind = resolveDatabaseBind().bind;
       console.log("[mariadb] starting on", `${env.mariadbBind}:${env.mariadbPort}`);
       await boot(b);
       state = "running";
@@ -702,9 +815,71 @@ export async function startMariaDb(): Promise<void> {
   if (started) await runReadyHooks("start");
 }
 
+export type RebindOutcome =
+  | { ok: true; bind: string; restarted: boolean }
+  | { ok: false; bind: string; error: string; restored: boolean };
+
+export async function rebindMariaDb(next: string, assertIdle: () => void = () => {}): Promise<RebindOutcome> {
+  let outcome: RebindOutcome | null = null;
+  await serialized(async () => {
+    assertIdle();
+    const previous = env.mariadbBind;
+    if (!wantRunning) {
+      env.mariadbBind = next;
+      outcome = { ok: true, bind: next, restarted: false };
+      return;
+    }
+    if (state !== "running" || !serverProc || hasExited(serverProc)) {
+      throw new Error(`MariaDB is ${state === "running" ? "not running" : state} right now; try again when it is running`);
+    }
+    if (previous === next) {
+      outcome = { ok: true, bind: next, restarted: false };
+      return;
+    }
+    const b = await getBinaries();
+    clearRestartTimer();
+    state = "starting";
+    runningSince = null;
+    await endPool();
+    await killServer(serverProc);
+    env.mariadbBind = next;
+    console.log("[mariadb] restarting on", `${next}:${env.mariadbPort}`);
+    try {
+      await boot(b);
+      state = "running";
+      lastError = null;
+      outcome = { ok: true, bind: next, restarted: true };
+      return;
+    } catch (err) {
+      const error = errorMessage(err);
+      console.error(`[mariadb] MariaDB did not start on ${next}; going back to ${previous}:`, error);
+      env.mariadbBind = previous;
+      try {
+        await boot(b);
+        state = "running";
+        lastError = null;
+        outcome = { ok: false, bind: previous, error, restored: true };
+      } catch (restoreErr) {
+        lastError = errorMessage(restoreErr);
+        state = "restarting";
+        startFailures = Math.max(1, startFailures + 1);
+        failedRestarts = startFailures;
+        restartAttempt = 0;
+        scheduleRestart();
+        outcome = { ok: false, bind: previous, error, restored: false };
+      }
+    }
+  });
+  const result = outcome as RebindOutcome | null;
+  if (!result) throw new Error("MariaDB was not restarted");
+  if (result.ok ? result.restarted : result.restored) await runReadyHooks("rebind");
+  return result;
+}
+
 export async function stopMariaDb(): Promise<void> {
   wantRunning = false;
   clearRestartTimer();
+  stopLogTimer();
   await serialized(async () => {
     clearRestartTimer();
     const proc = serverProc;

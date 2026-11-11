@@ -2,7 +2,7 @@ import { mkdirSync, existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { readPointer } from "./util/pointer";
 import { LEGACY } from "./util/legacy";
-import { readEnv } from "./util/readEnv";
+import { ENV_PREFIX, readEnv } from "./util/readEnv";
 
 export { ENV_PREFIX, readEnv } from "./util/readEnv";
 
@@ -24,6 +24,28 @@ function defaultDataDir(): string {
 }
 
 let _dataDir = readPointer() ?? defaultDataDir();
+export const DEFAULT_MARIADB_BIND = "127.0.0.1";
+
+export function mariadbBindFromEnvironment(source: Record<string, string | undefined> = process.env): string | null {
+  for (const prefix of [ENV_PREFIX, LEGACY.envPrefix]) {
+    const value = source[`${prefix}MARIADB_BIND`]?.trim();
+    if (value) return value;
+  }
+  return null;
+}
+
+function usableBind(value: string | null | undefined): string {
+  return value?.trim() || DEFAULT_MARIADB_BIND;
+}
+
+let _mariadbBind = usableBind(mariadbBindFromEnvironment());
+
+function detectContainer(): boolean {
+  const forced = readEnv("IN_CONTAINER");
+  if (forced === "1" || forced === "true") return true;
+  if (forced === "0" || forced === "false") return false;
+  return existsSync("/.dockerenv") || existsSync("/run/.containerenv");
+}
 
 export function setDataDir(path: string): void {
   _dataDir = path;
@@ -63,7 +85,14 @@ export const env = {
     return join(_dataDir, "master.key");
   },
   mariadbPort: Number(readEnv("MARIADB_PORT") ?? 3307),
-  mariadbBind: readEnv("MARIADB_BIND") ?? "127.0.0.1",
+  get mariadbBind(): string {
+    return _mariadbBind;
+  },
+  set mariadbBind(value: string) {
+    _mariadbBind = usableBind(value);
+  },
+  mariadbBindFromEnv: mariadbBindFromEnvironment(),
+  inContainer: detectContainer(),
   mariadbBin: readEnv("MARIADB_BIN") ?? null,
   rootUser: "lambdata_root",
   webOrigin: readEnv("WEB_ORIGIN") ?? "http://localhost:5173",

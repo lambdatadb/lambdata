@@ -6,7 +6,7 @@ Out of the box nothing is restricted: every connection is allowed, as in earlier
 
 ![The Network page](screenshots/network.png)
 
-> The MariaDB port (3307 by default) is separate from the console. Tunnels and Tailscale Serve carry the console only. Database clients still connect over the LAN or the tailnet, and the access policy below does not apply to them. Use each database's "connections from" setting for that.
+> The MariaDB port (3307 by default) is separate from the console. Tunnels and Tailscale Serve carry the console only. Database clients still connect over the LAN or the tailnet, and the access policy below does not apply to them. Use each database's "connections from" setting for that. Whether clients on other machines can reach MariaDB at all is set in the [Database connections](#database-connections) card.
 
 ## How LambData sees a connection
 
@@ -17,7 +17,7 @@ Every request is put in one of four groups. The **Where you are** card at the to
 | **This server** (loopback) | The request came from the machine LambData runs on (inside the container, for Docker) with no proxy in between, and its `Host`, `Origin` and `Referer` name only this machine. Always allowed, and exempt from the setup token: it is the way back in if you lock yourself out. `LAMBDATA_TRUST_LOOPBACK=0` turns this group off ([below](#a-forwarder-on-the-same-machine)). |
 | **Tailnet** | The client address is a Tailscale address (`100.64.0.0/10` or `fd7a:115c:a1e0::/48`), or the request came through Tailscale Serve. |
 | **Cloudflare** | The request carries Cloudflare's headers and arrived from a cloudflared that LambData runs itself or from a trusted proxy (see [Running elsewhere](#or-point-an-existing-cloudflared-at-it-running-elsewhere)). |
-| **LAN** | Everything else, including a port you forwarded on your router. |
+| **LAN** | Everything else, including a port you forwarded on your router. LambData cannot tell a device at home from one on the internet on such a connection, so with the console's port forwarded, whatever is allowed on the LAN (the console, and [access tokens](agents.md) allowed on "Local network") is reachable from the internet. |
 
 Two cases are treated with extra suspicion, so that a header can never make a request more trusted than where it came from:
 
@@ -107,6 +107,61 @@ Many Unraid users already run cloudflared as its own container. Choose **Running
 5. Press **Test my session**. It checks the Access token on that request (RS256 signature against your team's published keys, audience, issuer and expiry) and shows the email it belongs to.
 6. Turn on **Require Cloudflare Access**, then turn off **Local network** (and **Tailnet** if you do not use it). Save from the tunnel connection.
 
+## Database connections
+
+Database clients (a game server, an app on another machine, a tool such as DBeaver or the `mariadb` command) connect to MariaDB directly on its own port, 3307 by default, not through the console. By default MariaDB listens on `127.0.0.1` only. In Docker that means inside the container: nothing outside it can connect, even with the port published.
+
+### What the console shows
+
+Wherever the console shows a database address or connection string (the database list, a database's Overview, the credentials, the create and import dialogs, the dashboard's address line), it now says whether that address can work:
+
+- **Off, in a container**: it says database clients on other machines cannot connect yet and links to the switch below. The user name, password and schema can still be revealed; connection strings are marked as not reachable yet.
+- **Off, not in a container** (LambData installed directly on a machine): the address is `127.0.0.1`, reachable from that machine only.
+- **On**: the server's address and the port, as before.
+
+LambData tells whether it runs in a container from `/.dockerenv` or `/run/.containerenv`. `LAMBDATA_IN_CONTAINER=1` (or `true`) and `0` (or `false`) override that if it guesses wrong.
+
+### Allow database clients on other machines
+
+The **Database connections** card on the Network page shows the address and port MariaDB listens on and, for admins, the switch **Allow database clients on other machines**.
+
+- **On**: LambData restarts MariaDB listening on every address of the server (`0.0.0.0`). Each database's "connections from" setting then decides who may sign in.
+- **Off**: LambData restarts MariaDB listening on `127.0.0.1`. Clients on other machines are disconnected and cannot sign in again.
+
+Either way the restart drops every open database connection for a moment, so applications must reconnect. The change is refused while a background job is running or a database is closed for a rollback, import or sync (the message says which); try again when it has finished. If MariaDB does not start on the new address, LambData goes back to the previous one, starts MariaDB again and says what went wrong. Each change is recorded in the audit log.
+
+**In Docker the port must be published too**: `-p 3307:3307` with `docker run`, a `ports:` entry in Compose, or a port mapping on Unraid ([Unraid deployment](unraid.md#database-connections-from-other-machines)). LambData cannot see or change Docker's port mapping, so the switch can be on while the port is still not published.
+
+`LAMBDATA_MARIADB_BIND`, when set to any value, always wins. The switch then cannot be changed and says "Set by the container's variable", and changing the address means changing that variable and restarting the container. An install that set `LAMBDATA_MARIADB_BIND=0.0.0.0` for earlier versions keeps working unchanged. To use the switch instead, remove the variable, restart the container and turn the switch on: without the variable and without the switch, MariaDB listens on `127.0.0.1`.
+
+Once MariaDB listens on every address, anyone who can reach the port can try to sign in. Keep each database's "connections from" as narrow as you can, and do not forward the port on your router unless you mean to. A port open to the internet attracts automated sign-in attempts.
+
+### Rejected connections
+
+LambData records the sign-ins MariaDB refused and explains them. Passwords are never recorded.
+
+On a database's **Overview** tab, a **Rejected connections** section appears when there are any for that database's account: when, how many times, the address MariaDB saw, and why.
+
+| Reason | What it means |
+|---|---|
+| Address not allowed | The address does not match the database's "connections from" setting. MariaDB answers the client exactly as if the password were wrong, so this is the usual cause when the password is right. |
+| Wrong password | The address is allowed, but the password was wrong or missing. Check the password the client uses, especially after a password change. |
+| Closed for an operation | The password was right, but the database was briefly closed to its own account during a rollback, import or sync. The client can connect again once that finishes. |
+
+For an address that was not allowed, **Allow this address** sets "connections from" to that address after a confirmation that shows the current and the new value. It **replaces** the current value; it does not add to it.
+
+**The address shown is the one MariaDB saw.** Behind Docker's port mapping or a VPN, that can be different from the client's own address: a client on your tailnet, for example, can show up as the Docker network's gateway (such as `172.17.0.1`) rather than its `100.x.y.z` address. That is the address MariaDB compares with "connections from", so it is the one to allow. If it is a gateway address, other clients may arrive through it too, and allowing it lets all of them try to sign in.
+
+On the Network page, the **Database connections** card lists recent refused sign-ins for accounts that no database in LambData uses: a client set up with the wrong user name, or automated attempts. **Clear all** empties the whole record, including what the databases' Overview tabs show.
+
+Not listed: LambData's own internal accounts, and sign-ins MariaDB sees as coming from the server itself (`127.0.0.1`). Rejections are kept grouped by address, account and reason, with a count and the first and last time, for 30 days and at most 2,000 groups. A database shows up to 50 of them and the Network page up to 200.
+
+Where the information comes from:
+
+- When MariaDB has its `server_audit` plugin, LambData loads it for connection events only. It writes to `logs/mariadb-audit.log` in the data folder (up to 2 MB, plus one older file). If MariaDB does not start with the plugin, LambData starts it without and logs that. `LAMBDATA_CONNECTION_AUDIT=0` (or `false`, `off`) never loads the plugin.
+- Otherwise LambData reads the "Access denied" lines of MariaDB's error log. The Docker image's MariaDB has no audit plugin, so the image works this way. The error log does not tell a sign-in refused because the database was closed for a rollback, import or sync apart from the others, so "Closed for an operation" is not available there.
+- If neither is available, the Network page says "This MariaDB does not report refused sign-ins, so rejected connections are not listed." MariaDB itself works as before.
+
 ## Recovery
 
 If you lock yourself out:
@@ -120,7 +175,9 @@ API under `/api/network` (all need a signed-in user; everything except `GET /sta
 
 | Method and path | Purpose |
 |---|---|
-| `GET /status` | Current connection, policy, warnings, tunnel, Access and Tailscale state. Never includes secrets. |
+| `GET /status` | Current connection, policy, warnings, tunnel, Access and Tailscale state, and `databasePort` (what MariaDB listens on, whether outside connections are on, where that comes from). Never includes secrets. |
+| `PUT /database-port` | `{ "outsideConnections": true }` or `false`. Restarts MariaDB on the new address. HTTP 409 when `LAMBDATA_MARIADB_BIND` is set, while a job or a closed database is in the way, or when MariaDB had to go back to the old address; HTTP 503 when it did not start on either and LambData keeps retrying the old one. |
+| `GET /rejected-connections`, `DELETE /rejected-connections` | Every recorded rejected connection, including unknown accounts; clear them all. |
 | `PUT /policy` | Save the access policy (refused if it would block the caller). |
 | `PUT /public-urls` | Public URLs (added to the browser allow-list) and trusted proxies. |
 | `PUT /cloudflare/tunnel` | Mode (`off`, `managed`, `external`) and token. An empty token clears it. |
@@ -129,6 +186,6 @@ API under `/api/network` (all need a signed-in user; everything except `GET /sta
 | `POST /cloudflare/access/test` | Verify the current request's Access token and return its email. |
 | `POST /tailscale/serve` | `{ "enabled": true }` or `false`. Read-only when Unraid manages Tailscale. |
 
-`/api/tailscale/status`, `/up` and `/down` keep working as before.
+`/api/tailscale/status`, `/up` and `/down` keep working as before. `GET /api/databases/:id/rejected-connections` lists one database's rejected connections for anyone who can read that database.
 
-Environment: `LAMBDATA_ACCESS_POLICY=open` (recovery), `LAMBDATA_TRUST_LOOPBACK=0` (treat no connection from this machine as local), `LAMBDATA_EXTRA_ORIGINS` (comma-separated extra console addresses), `LAMBDATA_CLOUDFLARED_BIN` and `LAMBDATA_TAILSCALE_BIN` (use a specific binary instead of the one on `PATH`; a path that does not exist makes LambData treat the tool as not installed).
+Environment: `LAMBDATA_MARIADB_BIND` (the address MariaDB listens on; when set it wins over the switch), `LAMBDATA_CONNECTION_AUDIT=0` (never load the audit plugin), `LAMBDATA_IN_CONTAINER` (`1` or `0`, overrides container detection), `LAMBDATA_ACCESS_POLICY=open` (recovery), `LAMBDATA_TRUST_LOOPBACK=0` (treat no connection from this machine as local), `LAMBDATA_EXTRA_ORIGINS` (comma-separated extra console addresses), `LAMBDATA_CLOUDFLARED_BIN` and `LAMBDATA_TAILSCALE_BIN` (use a specific binary instead of the one on `PATH`; a path that does not exist makes LambData treat the tool as not installed).

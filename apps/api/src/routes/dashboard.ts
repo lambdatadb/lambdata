@@ -14,6 +14,7 @@ import { boundedHealthCheck } from "../util/mariadbHealth";
 import { requestFreshMetrics } from "../workers/metrics";
 import { dataDirFreeBytes } from "../util/disk";
 import { env } from "../env";
+import { isLoopbackBind } from "../connections/bind";
 
 export const dashboardRoute = new Hono<{ Variables: AuthVariables }>();
 
@@ -116,6 +117,8 @@ dashboardRoute.get("/summary", async (c) => {
       host: env.mariadbBind,
       port: env.mariadbPort,
       dashboardShowAddresses: settings.getBool("dashboard_show_addresses", true),
+      outsideConnections: !isLoopbackBind(env.mariadbBind),
+      inContainer: env.inContainer,
     },
   };
   return c.json(res);

@@ -6,6 +6,7 @@ import { effectivePolicy, loadNetworkConfig, policyLockedByEnv, saveServeUrl, ty
 import { classifyRequest, type IngressInfo } from "./classify";
 import { loopbackForwardingSeen, loopbackTrusted, type LoopbackForwarding } from "./request";
 import { cloudflaredBinary, cloudflaredVersion, tunnelConnections, tunnelDesired, tunnelState } from "./cloudflared";
+import { databasePortStatus } from "../connections/databasePort";
 
 export async function tunnelStatus(config: NetworkConfig): Promise<CloudflareTunnelStatus> {
   const bin = cloudflaredBinary();
@@ -94,5 +95,6 @@ export async function buildNetworkStatus(c: Context): Promise<NetworkStatus> {
     },
     tailscale: { ...tailscale, serve },
     bind: { host: env.host, port: env.port, mariadbBind: env.mariadbBind, mariadbPort: env.mariadbPort },
+    databasePort: databasePortStatus(),
   };
 }

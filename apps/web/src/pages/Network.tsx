@@ -1,20 +1,31 @@
+import { useEffect } from "react";
+import { useLocation } from "react-router-dom";
 import { PageHeader } from "../components/layout/PageShell";
 import { QueryError } from "../components/layout/QueryError";
 import { AccessCard } from "../components/network/AccessCard";
 import { AddressesCard } from "../components/network/AddressesCard";
 import { ConnectionCard } from "../components/network/ConnectionCard";
+import { DatabaseConnectionsCard } from "../components/network/DatabaseConnectionsCard";
 import { useNetworkPageStatus } from "../components/network/model";
 import { NetworkSection } from "../components/network/parts";
 import { PolicyCard } from "../components/network/PolicyCard";
 import { TailscaleCard } from "../components/network/TailscaleCard";
 import { TunnelCard } from "../components/network/TunnelCard";
-import { Alert, Card, DescriptionItem, DescriptionList, SkeletonRows } from "../components/ui";
+import { Alert, Card, SkeletonRows } from "../components/ui";
 import { useIsAdmin } from "../lib/auth";
 
 export function Network() {
   const isAdmin = useIsAdmin();
   const query = useNetworkPageStatus();
   const status = query.data;
+  const { hash } = useLocation();
+  const ready = !!status;
+
+  useEffect(() => {
+    if (!ready || !hash) return;
+    const target = document.getElementById(decodeURIComponent(hash.slice(1)));
+    target?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, [ready, hash]);
 
   return (
     <>
@@ -108,24 +119,9 @@ export function Network() {
             id="database-connections"
             step={6}
             title="Database connections"
-            description="MariaDB is reached separately from the console."
+            description="Whether game servers, apps and database tools on other machines can reach MariaDB, and which sign-ins it refused."
           >
-            <Card>
-              <div className="space-y-4">
-                <p className="text-body text-text-muted">
-                  Tunnels and Tailscale Serve carry the console only, and the policy above does not apply to MariaDB. Database
-                  clients connect directly over your local network or tailnet; limit them with each database's allowed hosts.
-                </p>
-                <DescriptionList>
-                  <DescriptionItem term="Console listens on" mono>
-                    {status.bind.host}:{status.bind.port}
-                  </DescriptionItem>
-                  <DescriptionItem term="MariaDB listens on" mono>
-                    {status.bind.mariadbBind}:{status.bind.mariadbPort}
-                  </DescriptionItem>
-                </DescriptionList>
-              </div>
-            </Card>
+            <DatabaseConnectionsCard status={status} isAdmin={isAdmin} />
           </NetworkSection>
         </div>
       )}
