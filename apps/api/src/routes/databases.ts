@@ -157,8 +157,11 @@ databasesRoute.post("/", async (c) => {
     }
     const visible = matches.find((d) => canSee(c, user, d));
     if (visible) {
+      const exists = `A database named ${visible.displayName} already exists (id ${visible.id}), created by ${creatorOf(visible)}.`;
       throw new HTTPException(409, {
-        message: `A database named ${visible.displayName} already exists (id ${visible.id}), created by ${creatorOf(visible)}. If it is the one you want, use it directly by its id; otherwise choose another name.`,
+        message: currentAccessToken(c)
+          ? `${exists} It was not returned because this access token did not create it. Choose another name, or ask the owner whether that database is the one to use.`
+          : `${exists} If it is the one you want, use it directly by its id; otherwise choose another name.`,
       });
     }
     if (!currentAccessToken(c) && matches.length > 0) {

@@ -112,12 +112,14 @@ describe.skipIf(!mariadbAvailable())("access token database scope", () => {
     expect(tokenBody.database).toBeUndefined();
     expect(tokenBody.error).toContain(trap.id);
     expect(tokenBody.error).toContain("the access token “Squatter”");
-    expect(tokenBody.error).toContain("use it directly by its id");
+    expect(tokenBody.error).toContain("It was not returned because this access token did not create it.");
+    expect(tokenBody.error).not.toContain("use it directly");
 
     const viaSession = await session(app, admin, "/api/databases", "POST", { displayName: `  ${name.toUpperCase()} `, ensure: true });
     expect(viaSession.status).toBe(409);
     const sessionBody = await viaSession.json();
     expect(sessionBody.database).toBeUndefined();
+    expect(sessionBody.error).toContain("use it directly by its id");
     expect(sessionBody.error).toContain(trap.id);
 
     const ownMade = await withToken(app, adminToken.secret, "/api/databases", { method: "POST", body: { displayName: `Ops ${RUN}`, ensure: true } });
@@ -147,7 +149,7 @@ describe.skipIf(!mariadbAvailable())("access token database scope", () => {
     const mcp = await callTool(app, adminToken.secret, "ensure_database", { name });
     expect(mcp.isError).toBe(true);
     expect(mcp.text).toContain(trap.id);
-    expect(mcp.text).toContain("use it directly by its id");
+    expect(mcp.text).toContain("this access token did not create it");
 
     const plain = await withToken(app, adminToken.secret, "/api/databases", { method: "POST", body: { displayName: name } });
     expect(plain.status).toBe(200);

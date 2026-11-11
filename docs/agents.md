@@ -106,7 +106,7 @@ The same token works on the management API. `GET /api/openapi.json` (with the to
 
 Errors always look like `{ "error": "…" }`, a sentence that says what went wrong.
 
-Create a database, safely. With `"ensure": true` a retry with the same name returns the database the caller itself created earlier with that name (`"created": false`) instead of making another. If a database with that name exists but someone else created it, the answer is HTTP 409 with a message that names who created it and gives its id: use that database directly, if the token may, or pick another name. A Builder token cannot see databases it did not create, so for it the name is free and it gets a new database of its own.
+Create a database, safely. With `"ensure": true` a retry with the same name returns the database the caller itself created earlier with that name (`"created": false`) instead of making another. If a database with that name exists but someone else created it, the answer is HTTP 409 with a message that names who created it and gives its id. It is not returned: choose another name, or ask the owner whether that database is the one to use. A Builder token cannot see databases it did not create, so for it the name is free and it gets a new database of its own. The schema name of a database created by a Builder token always ends in five random characters (for example `inventory_k3f9x`), so a name that is already taken elsewhere looks no different from one that is free.
 
 ```bash
 curl -s http://192.0.2.10:4317/api/databases \

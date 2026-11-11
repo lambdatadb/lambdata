@@ -375,7 +375,7 @@ const ensureDatabase = tool({
   name: "ensure_database",
   title: "Create or find a database",
   description:
-    "Creates a database with this display name, or returns the database this token created earlier with that name (compared trimmed and case-insensitively). If someone else created a database with that name and this token can see it, the answer is an error naming who created it and its id: use that database directly if it is the one wanted, or choose another name. Safe to call again with the same name. Says whether it was created. When a database is created and this token may see passwords, the result includes its connection details once; otherwise call get_connection_details later.",
+    "Creates a database with this display name, or returns the database this token created earlier with that name (compared trimmed and case-insensitively). If someone else created a database with that name and this token can see it, the answer is an error naming who created it and its id: it is not returned, so choose another name or ask the owner whether that database is the one to use. Safe to call again with the same name. Says whether it was created. When a database is created and this token may see passwords, the result includes its connection details once; otherwise call get_connection_details later.",
   input: z.object({
     name: z.string().trim().min(1).max(200).describe("Display name of the database, for example \"Inventory\"."),
     kind: z

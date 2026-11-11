@@ -4,7 +4,8 @@ import { basename, join, resolve, sep } from "node:path";
 import { HTTPException } from "hono/http-exception";
 import type { RowDataPacket } from "mysql2/promise";
 import type { Database, DatabaseCredentials, DatabaseKind } from "@lambdata/shared";
-import { databases, snapshots, syncJobs } from "../db/queries";
+import { accessTokens, databases, snapshots, syncJobs } from "../db/queries";
+import { tokenSeesEverything } from "../accessTokens/index";
 import { db } from "../db/client";
 import { createDatabaseAndUser, dropDatabaseAndUser } from "../mariadb/manager";
 import { withRootConnection } from "../mariadb/controller";
@@ -13,7 +14,7 @@ import { encryptSecret } from "../util/crypto";
 import { deriveSchemaName, generateMysqlUser, generatePassword } from "../util/credentials";
 import { buildConnectionStrings } from "../util/connstr";
 import { isSafeHostPattern } from "../util/ident";
-import { newId } from "../util/id";
+import { newId, randAlphaNum } from "../util/id";
 import { env } from "../env";
 import { tailscaleStatus } from "../tailscale/cli";
 import { runExclusive, sanitizeErrorMessage } from "../jobs";
@@ -77,9 +78,23 @@ async function mariaDbSnapshot(): Promise<{ schemas: Set<string>; users: Set<str
   }
 }
 
-function allocateSchemaName(displayName: string, taken: Set<string>): string {
+export const HIDDEN_SUFFIX_LENGTH = 5;
+
+export function ownerNeedsHiddenNames(ownerUserId: string): boolean {
+  const token = accessTokens.byActor(ownerUserId);
+  return token !== null && !tokenSeesEverything(token);
+}
+
+function allocateSchemaName(displayName: string, taken: Set<string>, randomEnding: boolean): string {
   const base = deriveSchemaName(displayName);
   const isFree = (name: string) => !SYSTEM_SCHEMAS.has(name) && !taken.has(name.toLowerCase());
+  if (randomEnding) {
+    for (let attempt = 0; attempt < MAX_NAME_ATTEMPTS; attempt++) {
+      const candidate = `${base}_${randAlphaNum(HIDDEN_SUFFIX_LENGTH)}`;
+      if (isFree(candidate)) return candidate;
+    }
+    throw new HTTPException(500, { message: "could not allocate a schema name" });
+  }
   if (isFree(base)) return base;
   for (let attempt = 1; attempt <= MAX_NAME_ATTEMPTS; attempt++) {
     const candidate = `${base}_${attempt}`;
@@ -105,12 +120,13 @@ export async function provisionDatabase(input: ProvisionDatabaseInput): Promise<
   }
   const password = generatePassword();
   const passwordEnc = await encryptSecret(password);
+  const randomEnding = ownerNeedsHiddenNames(input.ownerUserId);
 
   const reserved = await serializeAllocation(async () => {
     const live = await mariaDbSnapshot();
     return db.transaction(() => {
       const taken = new Set([...live.schemas, ...databases.allNames().map((n) => n.toLowerCase())]);
-      const schema = allocateSchemaName(displayName, taken);
+      const schema = allocateSchemaName(displayName, taken, randomEnding);
       const mysqlUser = generateMysqlUser(
         schema,
         (user) => live.users.has(user) || databases.mysqlUserExists(user),
