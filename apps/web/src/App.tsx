@@ -34,6 +34,9 @@ const Realtime = named(() => import("./pages/Realtime"), "Realtime");
 const Functions = named(() => import("./pages/Functions"), "Functions");
 const Activity = named(() => import("./pages/Activity"), "Activity");
 const Users = named(() => import("./pages/Users"), "Users");
+const AccessTokens = named(() => import("./pages/AccessTokens"), "AccessTokens");
+const AccessTokenPage = named(() => import("./pages/accessTokens/TokenPage"), "TokenPage");
+const Approvals = named(() => import("./pages/accessTokens/ApprovalsPage"), "ApprovalsPage");
 const Network = named(() => import("./pages/Network"), "Network");
 const Notifications = named(() => import("./pages/Notifications"), "Notifications");
 const Settings = named(() => import("./pages/Settings"), "Settings");
@@ -250,6 +253,9 @@ function AppRoutes() {
         <Route path="functions" element={<Functions />} />
         <Route path="activity" element={<Activity />} />
         <Route path="users" element={<Users />} />
+        <Route path="access-tokens" element={<AccessTokens />} />
+        <Route path="access-tokens/approvals" element={<Approvals />} />
+        <Route path="access-tokens/:id" element={<AccessTokenPage />} />
         <Route path="network/*" element={<Network />} />
         <Route path="notifications" element={<Notifications />} />
         <Route path="settings" element={<Settings />} />

@@ -6,6 +6,7 @@ import { useAuth, useCanWrite } from "../lib/auth";
 import { useCreateDatabaseDialog } from "../lib/createDatabase";
 import { useDashboardSummary } from "../lib/queries";
 import { AddressSubtitle } from "./dashboard/AddressSubtitle";
+import { ApprovalsBanner } from "./dashboard/ApprovalsBanner";
 import { ClusterVitalsCard } from "./dashboard/ClusterVitalsCard";
 import { DatabaseMetricsTable } from "./dashboard/DatabaseMetricsTable";
 import { NotificationsBanner } from "./dashboard/NotificationsBanner";
@@ -40,6 +41,7 @@ export function Dashboard() {
         {summary.isError && !s && (
           <QueryError error={summary.error} title="Could not load the dashboard" onRetry={summary.refetch} retrying={summary.isFetching} />
         )}
+        <ApprovalsBanner />
         <SyncFailureBanner summary={s} />
         <UnconvertedBanner />
         <NotificationsBanner />

@@ -20,10 +20,38 @@ import { Skeleton } from "../../components/ui/Skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../../components/ui/Tabs";
 import { RepoBadge } from "../../components/checkpoints/RepoBadge";
 import { useAuth } from "../../lib/auth";
+import { tokenPath } from "../../lib/accessTokens";
 import { databasePath } from "../../lib/commands";
 import { formatRelativeTime } from "../../lib/format";
 import { isNotFound, useDatabase } from "../../lib/queries";
 import { visibleDatabaseTabs } from "./tabs";
+
+export function DatabaseOwner({ db, linkTokens }: { db: Pick<Database, "ownerDisplayName" | "createdByTokenId" | "createdByTokenName">; linkTokens: boolean }) {
+  if (db.createdByTokenName) {
+    return (
+      <>
+        <span aria-hidden className="text-text-subtle">·</span>
+        <span data-created-by-token>
+          created by token{" "}
+          {linkTokens && db.createdByTokenId ? (
+            <Link to={tokenPath(db.createdByTokenId)} className="text-text underline decoration-border-control underline-offset-4 hover:decoration-text">
+              {db.createdByTokenName}
+            </Link>
+          ) : (
+            <span className="text-text">{db.createdByTokenName}</span>
+          )}
+        </span>
+      </>
+    );
+  }
+  if (!db.ownerDisplayName) return null;
+  return (
+    <>
+      <span aria-hidden className="text-text-subtle">·</span>
+      <span>owned by {db.ownerDisplayName}</span>
+    </>
+  );
+}
 
 export function DatabaseDetailPage() {
   const { id = "" } = useParams();
@@ -152,12 +180,7 @@ function DatabaseDetail({ id }: { id: string }) {
             <span className="font-mono text-code text-text">{db.name}</span>
             <span aria-hidden className="text-text-subtle">·</span>
             <span>created {formatRelativeTime(db.createdAt)}</span>
-            {db.ownerDisplayName && (
-              <>
-                <span aria-hidden className="text-text-subtle">·</span>
-                <span>owned by {db.ownerDisplayName}</span>
-              </>
-            )}
+            <DatabaseOwner db={db} linkTokens={user?.role === "admin"} />
           </span>
         }
       />

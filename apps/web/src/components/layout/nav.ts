@@ -2,6 +2,7 @@ import {
   Braces,
   Database,
   FolderOpen,
+  KeyRound,
   LayoutDashboard,
   Network,
   RadioTower,
@@ -22,6 +23,7 @@ export interface NavItem {
   description: string;
   keywords?: string[];
   roles?: Role[];
+  badge?: "approvals";
 }
 
 export interface NavGroup {
@@ -51,6 +53,15 @@ export const NAV_GROUPS: NavGroup[] = [
     items: [
       { to: "/activity", label: "Activity", icon: ScrollText, description: "Audit log", keywords: ["audit", "log", "events"], roles: ["admin"] },
       { to: "/users", label: "Users", icon: Users, description: "Console accounts and roles", keywords: ["accounts", "roles", "invite"], roles: ["admin"] },
+      {
+        to: "/access-tokens",
+        label: "Access tokens",
+        icon: KeyRound,
+        description: "Tokens for AI agents and scripts, and their approvals",
+        keywords: ["api key", "token", "agent", "mcp", "claude", "automation", "approvals", "ask first"],
+        roles: ["admin"],
+        badge: "approvals",
+      },
       { to: "/network", label: "Network", icon: Network, description: "Tailscale, tunnels and access policy", keywords: ["tailscale", "tailnet", "cloudflare", "tunnel"] },
       {
         to: "/notifications",

@@ -2,8 +2,9 @@ import { Fragment, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import type { AuditLogEntry } from "@lambdata/shared";
-import { ChevronRight, History, RotateCcw, Search, ShieldCheck } from "lucide-react";
+import { ChevronRight, History, KeyRound, RotateCcw, Search, ShieldCheck } from "lucide-react";
 import { api, errorMessage } from "../lib/api";
+import { APPROVALS_PATH, tokenPath } from "../lib/accessTokens";
 import { useAuth } from "../lib/auth";
 import { formatDate, formatRelativeTime } from "../lib/format";
 import { PageHeader } from "../components/layout/PageShell";
@@ -51,6 +52,55 @@ function prettyDetails(details: string | null): string | null {
   }
 }
 
+export function tokenTarget(target: string | null): { label: string; href: string } | null {
+  if (!target) return null;
+  if (target.startsWith("apr_")) return { label: "An approval request", href: APPROVALS_PATH };
+  if (target.startsWith("tok_")) return { label: "An access token", href: tokenPath(target) };
+  return null;
+}
+
+export function isTokenActor(log: Pick<AuditLogEntry, "actor_kind">): boolean {
+  return log.actor_kind === "token";
+}
+
+export function ActorCell({ log }: { log: AuditLogEntry }) {
+  if (isTokenActor(log)) {
+    const name = log.user_display_name || "Access token";
+    return (
+      <div className="flex min-w-0 items-center gap-2.5" data-actor="token">
+        <span aria-hidden className="grid size-6 shrink-0 place-items-center rounded-full border border-border bg-bg-raised text-text-muted">
+          <KeyRound className="size-3" />
+        </span>
+        <div className="flex min-w-0 items-center gap-1.5">
+          {log.token_id ? (
+            <Link
+              to={tokenPath(log.token_id)}
+              className="truncate text-body text-text underline decoration-border-control underline-offset-4 hover:decoration-text"
+            >
+              {name}
+            </Link>
+          ) : (
+            <span className="truncate text-body text-text">{name}</span>
+          )}
+          <Badge variant="muted" size="sm">
+            token
+          </Badge>
+        </div>
+      </div>
+    );
+  }
+  const who = log.user_display_name || log.user_email || "System";
+  return (
+    <div className="flex min-w-0 items-center gap-2.5" data-actor="user">
+      <Avatar size="sm" name={log.user_id ? who : "System"} />
+      <div className="min-w-0">
+        <div className="truncate text-body text-text">{who}</div>
+        {log.user_display_name && log.user_email && <div className="truncate text-micro text-text-subtle">{log.user_email}</div>}
+      </div>
+    </div>
+  );
+}
+
 export function Activity() {
   const { user } = useAuth();
   const isAdmin = user?.role === "admin";
@@ -67,13 +117,14 @@ export function Activity() {
   });
 
   const logs = logsQuery.data?.logs ?? [];
-  const targetOf = useAuditTargets(isAdmin);
+  const baseTarget = useAuditTargets(isAdmin);
+  const targetOf = (target: string | null) => tokenTarget(target) ?? baseTarget(target);
   const needle = filter.trim().toLowerCase();
   const visible = useMemo(
     () =>
       needle
         ? logs.filter((log) =>
-            [log.action, log.target, targetOf(log.target)?.label, log.user_email, log.user_display_name, log.details]
+            [log.action, log.target, targetOf(log.target)?.label, log.user_email, log.user_display_name, log.details, isTokenActor(log) ? "token" : null]
               .filter(Boolean)
               .some((v) => String(v).toLowerCase().includes(needle)),
           )
@@ -157,7 +208,6 @@ export function Activity() {
                   visible.map((log) => {
                     const details = prettyDetails(log.details);
                     const open = expanded === log.id;
-                    const who = log.user_display_name || log.user_email || "System";
                     const target = targetOf(log.target);
                     const outcome = auditOutcome(log.details);
                     return (
@@ -167,15 +217,7 @@ export function Activity() {
                             {formatRelativeTime(log.at)}
                           </TD>
                           <TD>
-                            <div className="flex min-w-0 items-center gap-2.5">
-                              <Avatar size="sm" name={log.user_id ? who : "System"} />
-                              <div className="min-w-0">
-                                <div className="truncate text-body text-text">{who}</div>
-                                {log.user_display_name && log.user_email && (
-                                  <div className="truncate text-micro text-text-subtle">{log.user_email}</div>
-                                )}
-                              </div>
-                            </div>
+                            <ActorCell log={log} />
                           </TD>
                           <TD>
                             <div className="flex flex-wrap items-center gap-1.5">

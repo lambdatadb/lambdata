@@ -1,4 +1,5 @@
 import { Link, NavLink, useLocation } from "react-router-dom";
+import type { Role } from "@lambdata/shared";
 import { useAuth } from "../../lib/auth";
 import { useAppSettings, useHealth, useNetworkStatus, useTailscaleStatus } from "../../lib/queries";
 import { BrandMark } from "../ui/Brand";
@@ -6,11 +7,77 @@ import { StatusDot, type StatusTone } from "../ui/Badge";
 import { SimpleTooltip } from "../ui/Tooltip";
 import { cn } from "../ui/cn";
 import { TUNNEL_PHASES, tunnelPhase } from "../../lib/network";
-import { NAV_GROUPS, isNavActive, visibleNavItems } from "./nav";
+import { NAV_GROUPS, isNavActive, visibleNavItems, type NavItem } from "./nav";
+import { pendingCount, usePendingApprovals } from "../../lib/accessTokens";
+
+export type NavBadges = Partial<Record<NonNullable<NavItem["badge"]>, number>>;
+
+export function NavGroups({
+  role,
+  pathname,
+  badges = {},
+  onNavigate,
+}: {
+  role: Role | undefined;
+  pathname: string;
+  badges?: NavBadges;
+  onNavigate?: () => void;
+}) {
+  return (
+    <>
+      {NAV_GROUPS.map((group, gi) => {
+        const items = visibleNavItems(group.items, role);
+        if (items.length === 0) return null;
+        return (
+          <div key={gi} className={cn(gi > 0 && "mt-5")}>
+            {group.title && <div className="px-3 pb-1.5 text-micro font-medium text-text-subtle">{group.title}</div>}
+            <ul className="space-y-px">
+              {items.map((item) => {
+                const Icon = item.icon;
+                const active = isNavActive(item, pathname);
+                const count = item.badge ? (badges[item.badge] ?? 0) : 0;
+                return (
+                  <li key={item.to}>
+                    <NavLink
+                      to={item.to}
+                      end={item.to === "/"}
+                      onClick={onNavigate}
+                      aria-current={active ? "page" : undefined}
+                      className={cn(
+                        "relative flex h-9 items-center gap-2.5 rounded-md px-3 text-body outline-none transition-colors",
+                        "focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70",
+                        active
+                          ? "bg-bg-hover font-medium text-text before:absolute before:left-0 before:top-2 before:h-5 before:w-0.5 before:rounded-full before:bg-accent"
+                          : "text-text-muted hover:bg-bg-hover/60 hover:text-text",
+                      )}
+                    >
+                      <Icon aria-hidden className={cn("size-4 shrink-0", active ? "text-text" : "text-text-subtle")} />
+                      <span className="truncate">{item.label}</span>
+                      {count > 0 && (
+                        <span
+                          className="ml-auto inline-flex h-[18px] min-w-[18px] shrink-0 items-center justify-center rounded-full bg-info/15 px-1.5 font-mono text-micro font-medium text-info"
+                          data-nav-badge={item.badge}
+                        >
+                          <span aria-hidden>{count > 99 ? "99+" : count}</span>
+                          <span className="sr-only">, {count === 1 ? "1 approval waiting" : `${count} approvals waiting`}</span>
+                        </span>
+                      )}
+                    </NavLink>
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+        );
+      })}
+    </>
+  );
+}
 
 export function SidebarBody({ onNavigate }: { onNavigate?: () => void }) {
   const { user } = useAuth();
   const { pathname } = useLocation();
+  const approvals = usePendingApprovals({ enabled: user?.role === "admin" });
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -26,41 +93,7 @@ export function SidebarBody({ onNavigate }: { onNavigate?: () => void }) {
       </div>
 
       <nav aria-label="Primary" className="min-h-0 flex-1 overflow-y-auto px-2 py-3">
-        {NAV_GROUPS.map((group, gi) => {
-          const items = visibleNavItems(group.items, user?.role);
-          if (items.length === 0) return null;
-          return (
-            <div key={gi} className={cn(gi > 0 && "mt-5")}>
-              {group.title && <div className="px-3 pb-1.5 text-micro font-medium text-text-subtle">{group.title}</div>}
-              <ul className="space-y-px">
-                {items.map((item) => {
-                  const Icon = item.icon;
-                  const active = isNavActive(item, pathname);
-                  return (
-                    <li key={item.to}>
-                      <NavLink
-                        to={item.to}
-                        end={item.to === "/"}
-                        onClick={onNavigate}
-                        aria-current={active ? "page" : undefined}
-                        className={cn(
-                          "relative flex h-9 items-center gap-2.5 rounded-md px-3 text-body outline-none transition-colors",
-                          "focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70",
-                          active
-                            ? "bg-bg-hover font-medium text-text before:absolute before:left-0 before:top-2 before:h-5 before:w-0.5 before:rounded-full before:bg-accent"
-                            : "text-text-muted hover:bg-bg-hover/60 hover:text-text",
-                        )}
-                      >
-                        <Icon aria-hidden className={cn("size-4 shrink-0", active ? "text-text" : "text-text-subtle")} />
-                        <span className="truncate">{item.label}</span>
-                      </NavLink>
-                    </li>
-                  );
-                })}
-              </ul>
-            </div>
-          );
-        })}
+        <NavGroups role={user?.role} pathname={pathname} badges={{ approvals: pendingCount(approvals.data) }} onNavigate={onNavigate} />
       </nav>
 
       <SystemStatus />
