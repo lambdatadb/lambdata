@@ -2,6 +2,42 @@
 
 All notable changes to LambData (formerly KilnDB).
 
+## Unreleased: database connections, access tokens, row changes
+
+### Upgrading
+
+- The four new metadata migrations (0017 to 0020) only add tables and columns; no data is rewritten or removed. There are no access tokens, no outside database connections that were not there before, and no new notifications until an admin sets them up.
+- `LAMBDATA_MARIADB_BIND` keeps working and always wins over the new switch on the Network page. An install that sets it to `0.0.0.0` keeps accepting outside database connections. An install without it keeps MariaDB on `127.0.0.1`, as before, until an admin turns the switch on.
+- Two things start on their own. Sync results and **Sync finished** messages now include row changes; all comparing work is limited to 30 seconds per sync by default, and tables not reached by then are reported as not compared. And LambData starts recording refused MariaDB sign-ins: on the Docker image it reads MariaDB's error log; where MariaDB has the `server_audit` plugin, MariaDB is started with it for connection events only (set `LAMBDATA_CONNECTION_AUDIT=0` to prevent that).
+
+### Database connections
+
+- The console no longer shows a database address that cannot work. Wherever it shows an address or connection string, it says when database clients on other machines cannot connect yet (MariaDB listening inside the container only) and links to the switch. On an install outside a container it shows `127.0.0.1` and says the database is reachable from that machine only.
+- **Allow database clients on other machines**, a switch in the new **Database connections** card on the Network page, does what setting `LAMBDATA_MARIADB_BIND=0.0.0.0` did: it restarts MariaDB listening on every address. It is refused while a job is running or a database is closed for an operation, and if MariaDB does not start on the new address LambData goes back to the old one. The port still has to be published in Docker. When `LAMBDATA_MARIADB_BIND` is set, the switch shows its value and cannot be changed.
+- **Rejected connections**: sign-ins MariaDB refused are listed on the database's Overview tab, with the address MariaDB saw, how often, and why (address not allowed, wrong password, closed for an operation). **Allow this address** replaces the database's "connections from" with that address after a confirmation. Behind Docker or a VPN that address can differ from the client's own. The Network page lists refused sign-ins for accounts no database uses. Kept 30 days, at most 2,000 groups; passwords are never recorded.
+- Refusals are read from MariaDB's `server_audit` plugin when it is available, otherwise from MariaDB's error log (the case on the Docker image, where "closed for an operation" cannot be told apart). `LAMBDATA_CONNECTION_AUDIT=0` never loads the plugin. `LAMBDATA_IN_CONTAINER` overrides container detection.
+- See [Network access](docs/network.md#database-connections).
+
+### Access tokens and agents
+
+- **Access tokens** for AI agents and scripts, created by admins on the new **Access tokens** page, with three presets: Read only, Builder (creates its own databases and manages only those) and Admin. The secret is shown once and only its hash is stored. See [Agents](docs/agents.md) and [SECURITY.md](SECURITY.md#access-tokens).
+- A built-in **MCP endpoint** at `/mcp` for Claude Code and other MCP clients, and an API description at `/api/openapi.json` for the part of the management API tokens can reach.
+- Default deny: a token reaches only what is on its preset's list, never users, settings, network, notifications, storage, functions, App Auth, Realtime, checkpoint downloads or other tokens. Databases outside its reach answer as if they did not exist.
+- Tokens work from this machine, the local network and the tailnet by default; Cloudflare is opt-in per token. Limits per token: requests per minute (120), databases a Builder may create (10), expiry, chosen databases only, whether it may see database passwords. **Pause all tokens** stops every token at once.
+- **Ask first** (on by default for Admin): deleting a database, rolling back, deleting a checkpoint, an import that replaces data, and SQL starting with `DROP` or `TRUNCATE` wait for an admin's approval on the **Approvals** page. An approval lets one identical request through within 60 minutes.
+- **Undo points**: before a token first changes data with SQL on a versioned database, LambData saves a checkpoint "Before changes by <token>", reused while the token keeps working there (until 30 minutes without changes). It counts as a safety checkpoint. See [Checkpoints](docs/checkpoints.md#undo-points-for-access-tokens).
+- Each token's page lists its activity: what it did, on which database, the outcome, the agent's note, the address, and whether it came through MCP. The Activity page, notifications and database pages name tokens as such.
+- `POST /api/databases` accepts `ensure: true` for safe retries: it returns a database the caller itself created earlier with that name instead of creating a second one. If a database with that name was created by someone else, the answer is HTTP 409 naming who created it and its id; a Builder token that cannot see that database gets a new one of its own.
+- SQL results for tokens are capped at 500 rows by default (at most 5,000) and say when rows were cut.
+
+### Row changes
+
+- Mirror syncs measure what they changed: rows added, removed and changed per table, compared row by row for InnoDB tables with a usable key, and rows before and after for the rest. The Sync tab, the job result and the **Sync finished** message show it ("3 tables changed: 1,204 rows added, 12 removed, 40 changed", then up to five tables), or "Nothing changed." The comparison runs before the new copy is swapped in, closes nothing, and never fails a sync. `LAMBDATA_SYNC_DIFF_MAX_ROWS` (2,000,000 rows per table for row by row) and `LAMBDATA_SYNC_DIFF_MAX_SECONDS` (30 seconds for all comparing per sync) bound it; tables the time limit did not reach are reported as not compared (`tablesNotCompared`).
+- **Checkpoint made** and **Automatic checkpoint** messages say what changed since the previous checkpoint.
+- **Skip sync messages when nothing changed**, per destination: no message for a sync that changed nothing or an automatic checkpoint that saved nothing new. Failures and recoveries still arrive.
+- New notification group **Access tokens** with **Access token created**, **Access token revoked** (both off by default) and **Approval needed** (on by default).
+- Webhook payloads of `sync.finished` carry a new top-level `changes` field with up to 20 changed tables, and the totals in `data`. The payload version stays 1. See [Notifications](docs/notifications.md#row-changes-in-the-payload).
+
 ## Unreleased: LambData
 
 KilnDB is now LambData. The image is `ghcr.io/lambdatadb/lambdata` and the repository is `github.com/lambdatadb/lambdata`.

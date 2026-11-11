@@ -18,7 +18,7 @@ Every database gets automatic checkpoints, versioned or not: **one per period**,
 
 - There is one automatic checkpoint per period, however many syncs run in it. The schedule and scheduled syncs share that one slot.
 - A check that finds nothing changed since the last checkpoint saves nothing, but still counts as that period's check. A database with no tables is not checkpointed.
-- **How many to keep** counts scheduled and sync checkpoints together. Safety checkpoints (the ones taken before a rollback, an import or a sync) keep their own count of the same size, so three rollbacks in a row do not push out your daily checkpoints.
+- **How many to keep** counts scheduled and sync checkpoints together. Safety checkpoints (the ones taken before a rollback, an import or a sync, and the [undo points](#undo-points-for-access-tokens) saved before an access token changes data) keep their own count of the same size, so three rollbacks in a row do not push out your daily checkpoints.
 
 Never removed automatically: checkpoints you made yourself, checkpoints taken after an import, snapshots converted from KilnDB, pinned checkpoints, and the current HEAD.
 
@@ -118,6 +118,22 @@ DROP DATABASE `_ld_quarantine_xxxxxxxx_orders`;
 ```
 
 In the rare case where the original table cannot be put back because something else now uses its name, the job names the schema that holds the original, untouched, and says to rename or remove the new object and move the table back with `RENAME TABLE`.
+
+## Undo points for access tokens
+
+When an [access token](agents.md) is about to change data with SQL on a **versioned** database, LambData first saves a checkpoint with the message "Before changes by <token name>" and remembers it as that token's **undo point** for that database. History shows it with an **undo point** badge.
+
+- **Once per stretch of work.** Further changes by the same token on the same database reuse that undo point until the token has made no change there for 30 minutes. The next change after that saves a new one. Each token has its own undo point per database.
+- **Nothing new, nothing saved.** If the database has not changed since its last checkpoint, the undo point is that checkpoint instead of a new copy.
+- **No undo point, no change.** If the undo point cannot be saved (for example because a rollback or import is running on the database), the token's SQL is refused with the reason and nothing runs.
+- **Only for SQL on versioned databases.** On a database that is not versioned no undo point is saved, and the token's SQL result says so (`versioned: false`). Imports, rollbacks and syncs started by a token take their usual safety checkpoints instead.
+- **Read-only statements** (`SELECT`, `SHOW` and the like) never save one.
+
+Saving an undo point does not send a notification of its own.
+
+**Undoing.** The token itself can roll back to its undo point (`POST /api/databases/<id>/undo`, or the `undo_changes` tool over MCP). That is an ordinary rollback with its safety checkpoint first, and a token set to ask first needs an approval for it. From the console, open the database's History, find the checkpoint "Before changes by <token name>" and choose **Roll back to this**. Either way, everything that changed since that checkpoint is undone, including changes made by people or applications in the meantime, so check the rollback dialog's list of tables before you confirm.
+
+**Retention.** Undo points are safety checkpoints: they share the safety count of **How many to keep** with the checkpoints taken before rollbacks, imports and syncs, and the oldest are removed first. A busy agent can push older safety checkpoints out; pin a checkpoint you want to keep.
 
 ## Mirrors
 

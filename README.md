@@ -8,13 +8,14 @@ LambData was called KilnDB. If you run KilnDB today, read [Upgrading from KilnDB
 
 ## What you can do
 
-- **Create databases.** Each one gets its own schema, its own MariaDB user and password (shown once) and ready-to-copy connection strings. Limit where it can be reached from, including tailnet only.
+- **Create databases.** Each one gets its own schema, its own MariaDB user and password (shown once) and ready-to-copy connection strings. Limit where it can be reached from, including tailnet only. The console says when a database cannot be reached from other machines yet, and lists the sign-ins MariaDB refused, with the reason.
 - **Keep checkpoints and roll back.** Save a database's state at any moment without stopping it, automatically every day or whenever you like. See what changed, download a checkpoint as SQL, and roll back, with a safety checkpoint taken first. [More about checkpoints](docs/checkpoints.md).
 - **Create a database from a file.** Drop in a SQLite file (a game server's `sv.db`, any `.db`, `.sqlite` or `.sqlite3`) or a MySQL/MariaDB dump, check the plan, and get a MariaDB database. [More about importing](docs/importing.md).
 - **Mirror other databases.** Copy a MySQL, MariaDB or PostgreSQL database on a schedule. A versioned mirror can take its daily checkpoint right after a sync, and **Sync now** can add an extra one.
 - **Serve your apps.** A REST Data API over your tables with per-table policies, App Auth for your apps' users, Realtime WebSocket channels, TypeScript functions and file storage.
 - **Choose who can reach the console.** Your local network, your Tailscale tailnet, a Cloudflare Tunnel behind Cloudflare Access, or any mix. [More about network access](docs/network.md).
-- **Get notified.** Optional messages to Discord, Slack or Mattermost, your phone through ntfy, or a signed webhook when a database is created, a checkpoint is made, a rollback is refused, a mirror stops syncing or the disk runs low. Off until an admin adds a destination. [More about notifications](docs/notifications.md).
+- **Get notified.** Optional messages to Discord, Slack or Mattermost, your phone through ntfy, or a signed webhook when a database is created, a checkpoint is made, a rollback is refused, a mirror stops syncing or the disk runs low. Sync messages say how many rows were added, removed and changed per table. Off until an admin adds a destination. [More about notifications](docs/notifications.md).
+- **Let AI agents and scripts help.** Access tokens give an agent (Claude Code or any MCP client) or a script its own limited way into the management API, with a built-in MCP endpoint, approvals for destructive steps and an undo point before it changes data. Off until an admin creates a token. [More about agents](docs/agents.md).
 - **Share it safely.** Console users are admins, database owners or read-only viewers.
 
 ## Install
@@ -113,7 +114,7 @@ More: [Create a database from a file](docs/importing.md).
 
 ## Network access
 
-The **Network** page shows how you are connected and lets an admin choose which ways in are allowed: local network, tailnet, Cloudflare. It can run a Cloudflare Tunnel for you and check Cloudflare Access sign-ins. Nothing is restricted until you change it.
+The **Network** page shows how you are connected and lets an admin choose which ways in are allowed: local network, tailnet, Cloudflare. It can run a Cloudflare Tunnel for you and check Cloudflare Access sign-ins. Nothing is restricted until you change it. Its **Database connections** card decides whether database clients on other machines can reach MariaDB at all ([below](#connecting-to-databases-from-outside-docker)).
 
 ![The Network page](docs/screenshots/network.png)
 
@@ -126,6 +127,18 @@ LambData can tell you when something happens: in a Discord channel, a Slack or M
 ![Notification destinations, one of them failing](docs/screenshots/notifications-list.png)
 
 More, including the webhook format and how to check its signature: [Notifications](docs/notifications.md).
+
+## Access tokens for agents and scripts
+
+An admin can create an **access token** on the **Access tokens** page (under **Operate**) so that an AI agent or a script can create and manage databases without a browser session. Each token has one of three presets:
+
+- **Read only**: reads databases, checkpoints and jobs, and runs read-only SQL. It cannot change anything.
+- **Builder**: creates its own databases and manages only those. Other databases stay invisible to it.
+- **Admin**: manages every database, or only the ones you choose. Destructive actions ask first by default.
+
+The token is shown once, when you create it. Agents that speak MCP connect to `http://<server>:4317/mcp` with the token in an `Authorization: Bearer` header; scripts use the same token with the management API. No token can reach users, settings, the network page, notifications or other tokens, and by default a token only works from this machine, your local network and your tailnet. Every request a token makes is listed on its page.
+
+Setting up Claude Code or another agent, the tools it gets, approvals and undo points: [Agents](docs/agents.md). What tokens can never do and how they are protected: [SECURITY.md](SECURITY.md#access-tokens).
 
 ## Data API, App Auth, Realtime and Functions
 
@@ -181,12 +194,13 @@ Functions run with the same rights as LambData itself. Only admins can write the
 - Admins can cap how many automatic checkpoints database owners keep and how often they run.
 - Viewers are read-only everywhere and use a read-only MariaDB account in the SQL editor.
 - Functions are trusted code written by admins; there is no sandbox.
+- Access tokens are limited by their preset, a database limit, a request limit (120 a minute by default) and where they may connect from. An admin can pause one token or all of them at once.
 
 All limits, their defaults and variables, and how to report a security problem: [SECURITY.md](SECURITY.md).
 
 ## Configuration
 
-No environment variables are needed for the default Docker setup. Every `LAMBDATA_*` variable except the new `LAMBDATA_FIX_DATA_OWNERSHIP` can also be given with the old `KILNDB_*` prefix; when both are set, `LAMBDATA_*` wins.
+No environment variables are needed for the default Docker setup. Every `LAMBDATA_*` variable except `LAMBDATA_FIX_DATA_OWNERSHIP` can also be given with the old `KILNDB_*` prefix; when both are set, `LAMBDATA_*` wins.
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -194,8 +208,12 @@ No environment variables are needed for the default Docker setup. Every `LAMBDAT
 | `HOST` | `127.0.0.1`, `0.0.0.0` in Docker | Address the console listens on |
 | `LAMBDATA_DATA_DIR` | `<repo>/.lambdata`, `/data` in Docker | Data folder |
 | `LAMBDATA_MARIADB_PORT` | `3307` | Port of the managed MariaDB |
-| `LAMBDATA_MARIADB_BIND` | `127.0.0.1` | Address MariaDB listens on |
+| `LAMBDATA_MARIADB_BIND` | not set | Address MariaDB listens on. When set, it always wins over the **Allow database clients on other machines** switch on the Network page. Not set, the switch decides: off (`127.0.0.1`) until an admin turns it on (`0.0.0.0`). See [below](#connecting-to-databases-from-outside-docker) |
 | `LAMBDATA_MARIADB_BIN` | found on `PATH` | Path to `mariadbd` |
+| `LAMBDATA_CONNECTION_AUDIT` | on when available | `0` (or `false`, `off`) stops LambData from loading MariaDB's `server_audit` plugin to record refused sign-ins; it then reads them from MariaDB's error log. See [Network access](docs/network.md#rejected-connections) |
+| `LAMBDATA_IN_CONTAINER` | detected | `1` or `true` tells LambData it runs in a container, `0` or `false` that it does not. Only changes how the console describes database addresses. Detected from `/.dockerenv` or `/run/.containerenv` |
+| `LAMBDATA_SYNC_DIFF_MAX_ROWS` | `2000000` | Largest table a mirror sync compares row by row to count added, removed and changed rows. `0` turns the row-by-row comparison off. See [Notifications](docs/notifications.md#rows-changed-by-a-sync) |
+| `LAMBDATA_SYNC_DIFF_MAX_SECONDS` | `30` | Time one sync may spend on all of its comparing (counts, checksums and row-by-row). Tables not reached by then are reported as not compared. `0` turns the comparing off |
 | `LAMBDATA_COOKIE_SECURE` | `0` | `1` forces Secure session cookies. Not needed for HTTPS: cookies become Secure on their own there. |
 | `LAMBDATA_EXTRA_ORIGINS` | empty | Extra console addresses, comma-separated, for proxies that rewrite the `Host` header and for web apps on other addresses |
 | `LAMBDATA_ACCESS_POLICY` | empty | `open` resets a network policy that locked you out |
@@ -210,7 +228,10 @@ Limits (`LAMBDATA_DISK_FLOOR`, `LAMBDATA_IMPORT_MAX_BYTES` and others) are liste
 
 ### Connecting to databases from outside Docker
 
-MariaDB listens only inside the container by default. To let MySQL clients on your network connect, publish its port and bind it to all addresses:
+MariaDB listens only inside the container by default, so a game server, app or database tool on another machine cannot connect yet. The console says so wherever it shows a database address, instead of showing an address that would not work. Two steps let them in:
+
+1. On the **Network** page, turn on **Allow database clients on other machines** in the **Database connections** card. LambData restarts MariaDB so it listens on every address (`0.0.0.0`); open database connections drop for a moment.
+2. Publish the MariaDB port in Docker. LambData cannot see or change this.
 
 ```yaml
 services:
@@ -218,11 +239,13 @@ services:
     ports:
       - "4317:4317"
       - "3307:3307"
-    environment:
-      LAMBDATA_MARIADB_BIND: "0.0.0.0"
 ```
 
-Only do this on a network you trust, and set each database's "connections from" setting as narrowly as you can instead of `%`.
+With `docker run`, add `-p 3307:3307`. On Unraid, see [Unraid deployment](docs/unraid.md#database-connections-from-other-machines).
+
+Setting `LAMBDATA_MARIADB_BIND` (for example `0.0.0.0`, as earlier versions needed) still works and always wins: the switch then shows the value and says it comes from the container's variable. To use the switch instead, remove the variable and restart the container, then turn the switch on.
+
+Only open the port on a network you trust, and set each database's "connections from" setting as narrowly as you can instead of `%`. When a client is refused, the database's **Overview** tab lists the attempt with the address MariaDB saw and why, and offers **Allow this address** when the address was the problem. Behind Docker or a VPN that address can be different from the client's own address. More: [Network access](docs/network.md#database-connections).
 
 ## Data and backups
 
